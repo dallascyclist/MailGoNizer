@@ -21,6 +21,17 @@ class RunLog:
         self._jsonl = jsonl
         self._threshold = threshold
 
+    @property
+    def debug_enabled(self) -> bool:
+        """Whether the configured threshold admits debug-level output.
+
+        A fact about the sink's own configuration, not a policy decision —
+        callers (e.g. do_plan's in_place suppression) use it to decide
+        whether a given record is worth writing, but RunLog itself stays a
+        dumb sink that knows only what level it was opened at.
+        """
+        return self._threshold <= _LEVELS["debug"]
+
     @staticmethod
     def stamp_now() -> str:
         """Zero-padded and numeric so lexical sort equals chronological sort."""
