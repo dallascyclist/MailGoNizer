@@ -117,7 +117,11 @@ def build_plan(messages: list[ClassifiedMessage], cfg: Config, delimiter: str,
     skip_counts = Counter(s.reason for s in skips)
     summary = {
         "surveyed": len(messages),
+        "eligible": len(eligible_inbox),
         "planned": len(items),
+        "backfill": sum(1 for i in items if i.reason == "backfill"),
+        "archive": sum(1 for i in items if i.reason == "archive"),
+        "promotions": len(new_promotions),
         "truncated_by_cap": truncated,
     }
     summary.update({f"skipped_{k}": v for k, v in skip_counts.items()})

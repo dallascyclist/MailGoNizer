@@ -203,17 +203,36 @@ def test_counts_summarise_the_run():
     msgs = [msg(), msg(when=RECENT), msg(flags=("\\Flagged",))]
     r = build_plan(msgs, cfg(), "/", set(), NOW)
     assert r.counts["surveyed"] == 3
+    assert r.counts["eligible"] == 1
     assert r.counts["planned"] == 1
+    assert r.counts["backfill"] == 0
+    assert r.counts["archive"] == 1
+    assert r.counts["promotions"] == 0
     assert r.counts["skipped_too_recent"] == 1
     assert r.counts["skipped_flagged"] == 1
 
 
 def test_planning_fifty_thousand_messages_is_fast():
     import time
-    msgs = [msg(domain=f"d{i % 900}.com", local=f"u{i % 60}")
-            for i in range(50_000)]
+    # New-only inbox mail never populates `backfills`, so it cannot exercise
+    # the ordering hot path the linear-merge fix guards. Pre-populate a large
+    # already-archived population whose (year, domain, local) buckets cross
+    # the promotion threshold this run, so every one of those archived
+    # messages must be backfilled into the newly promoted per-sender folder.
+    backfill_senders = 715
+    per_sender = 14  # one over the default promote_threshold of 13
+    archived = [
+        msg(domain=f"b{i}.com", local="orders",
+            folder=f"Crono_Archive/{OLD.year}/b{i}_com")
+        for i in range(backfill_senders) for _ in range(per_sender)
+    ]
+    inbox = [msg(domain=f"d{i % 900}.com", local=f"u{i % 60}")
+             for i in range(50_000 - len(archived))]
+    msgs = archived + inbox
     start = time.monotonic()
     r = build_plan(msgs, cfg(), "/", set(), NOW)
     elapsed = time.monotonic() - start
     assert len(r.items) > 0
+    backfill_count = sum(1 for i in r.items if i.reason == "backfill")
+    assert backfill_count == backfill_senders * per_sender
     assert elapsed < 10.0, f"planner took {elapsed:.1f}s for 50k messages"
