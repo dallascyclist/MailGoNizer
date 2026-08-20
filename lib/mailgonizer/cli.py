@@ -10,7 +10,7 @@ import shutil
 import sys
 from pathlib import Path
 
-from mailgonizer import runner
+from mailgonizer import recovery, runner
 from mailgonizer.config import Config, ConfigError, load_config
 from mailgonizer.imap import FatalError, Mailbox
 from mailgonizer.index import Index
@@ -58,6 +58,14 @@ def build_parser() -> argparse.ArgumentParser:
     run_p = sub.add_parser("run", help="plan and apply in one process")
     run_p.add_argument("--dry-run", action="store_true",
                        help="plan only; perform no moves")
+
+    undo_p = sub.add_parser("undo", help="reverse a run's moves")
+    undo_p.add_argument("--run", type=int, required=True, help="run id to reverse")
+
+    export_p = sub.add_parser("export-index", help="dump the index")
+    export_p.add_argument("--format", choices=["csv", "json"], default="json")
+
+    sub.add_parser("rebuild-index", help="discard the cache and rescan the server")
     return parser
 
 
@@ -159,6 +167,10 @@ def main(argv: list[str] | None = None, mailbox_factory=None) -> int:
             if args.command == "show-plan":
                 return _show_plan(index, _latest_run(index, args.run), args.format)
 
+            if args.command == "export-index":
+                recovery.export_index(index, args.format, sys.stdout)
+                return EXIT_OK
+
             psl = PublicSuffixList.bundled()
             mailbox = connect(cfg)
 
@@ -201,6 +213,16 @@ def main(argv: list[str] | None = None, mailbox_factory=None) -> int:
                 log.verdict(counts)
                 RunLog.prune(log_dir, cfg.logging.retention_runs)
                 return EXIT_OK if outcome.failed == 0 else EXIT_WITH_FAILURES
+
+            if args.command == "undo":
+                outcome = recovery.undo_run(mailbox, index, cfg, log, args.run)
+                RunLog.prune(log_dir, cfg.logging.retention_runs)
+                return EXIT_OK
+
+            if args.command == "rebuild-index":
+                recovery.rebuild_index(mailbox, index, cfg, psl, log)
+                RunLog.prune(log_dir, cfg.logging.retention_runs)
+                return EXIT_OK
 
         except FatalError as exc:
             log.error(str(exc))

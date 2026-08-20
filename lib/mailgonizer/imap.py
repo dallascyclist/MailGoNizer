@@ -212,6 +212,10 @@ class Mailbox:
             )
         return out
 
+    def list_uids(self, folder: str) -> list[int]:
+        self.select(folder, readonly=True)
+        return [int(u) for u in self.client.search(["ALL"])]
+
     # --- writes -----------------------------------------------------------
 
     def move(self, uids: list[int], dst: str) -> None:

@@ -281,3 +281,16 @@ def test_exit_code_two_when_items_fail(root, monkeypatch):
 def test_unknown_subcommand_exits_nonzero(root):
     with pytest.raises(SystemExit):
         main(["--root", str(root), "frobnicate"])
+
+
+def test_export_index_runs_without_a_server(root, capsys):
+    run_cli(root, ["plan"], StubMailbox(headers={"INBOX": []}))
+    capsys.readouterr()  # drain the plan's own RunLog narrative echo
+    assert run_cli(root, ["export-index", "--format", "json"],
+                   StubMailbox()) == 0
+    assert "messages" in json.loads(capsys.readouterr().out)
+
+
+def test_undo_requires_an_explicit_run_id(root):
+    with pytest.raises(SystemExit):
+        main(["--root", str(root), "undo"])
