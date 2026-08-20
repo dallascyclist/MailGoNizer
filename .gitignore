@@ -1,0 +1,20 @@
+# Runtime state — owned by the tool, never committed
+venv/
+log/
+db/
+etc/config.yaml
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local agent tooling
+.remember/
+.serena/
+.claude/settings.local.json
+
+# macOS
+.DS_Store
