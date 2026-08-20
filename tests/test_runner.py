@@ -8,9 +8,9 @@ from mailgonizer.config import ArchiveConfig, Config, ServerConfig
 from mailgonizer.imap import Capabilities
 from mailgonizer.index import Index
 from mailgonizer.psl import PublicSuffixList
-from mailgonizer.records import HeaderRecord
+from mailgonizer.records import HeaderRecord, PlanItem
 from mailgonizer.runlog import RunLog
-from mailgonizer.runner import classify, config_hash, do_check, do_plan
+from mailgonizer.runner import classify, config_hash, do_apply, do_check, do_plan
 
 NOW = datetime(2026, 8, 19, tzinfo=timezone.utc)
 OLD = NOW - timedelta(days=400)
@@ -116,6 +116,65 @@ def test_check_returns_fatal_when_the_server_is_unsafe(tmp_path):
 
     with RunLog.open(tmp_path, "s", "info") as log:
         assert do_check(MB(), cfg(), log) == 1
+
+
+# --- assert_safe() wiring in do_plan and do_apply -------------------------
+#
+# assert_safe() refuses to run against a server offering neither MOVE nor
+# UIDPLUS, because the only remaining way to move mail there is COPY +
+# STORE \Deleted + a bare EXPUNGE, which permanently destroys every
+# \Deleted message in the folder -- including mail soft-deleted in a
+# client months ago and never expunged. do_check's refusal is already
+# covered above; these two lock in that do_plan and do_apply -- the
+# functions that actually touch the mailbox -- refuse just as hard, and
+# refuse *before* doing any work rather than after some of it.
+
+
+def _unsafe_mailbox():
+    from mailgonizer.imap import UnsafeServerError
+
+    class MB:
+        def capabilities(self):
+            return Capabilities("/", False, False, {})
+
+        def assert_safe(self):
+            raise UnsafeServerError("neither MOVE nor UIDPLUS")
+
+    return MB()
+
+
+def test_do_plan_refuses_to_run_against_an_unsafe_server(tmp_path, psl):
+    from mailgonizer.imap import UnsafeServerError
+
+    with Index.open(tmp_path / "t.sqlite") as index, \
+            RunLog.open(tmp_path, "s", "info") as log:
+        with pytest.raises(UnsafeServerError):
+            do_plan(_unsafe_mailbox(), index, cfg(), psl, log, NOW)
+
+        # assert_safe() is do_plan's first statement -- no run should ever
+        # have been started, proving the refusal happened before any work.
+        assert index.last_run() is None
+
+
+def test_do_apply_refuses_to_run_against_an_unsafe_server(tmp_path, psl):
+    from mailgonizer.imap import UnsafeServerError
+
+    with Index.open(tmp_path / "t.sqlite") as index, \
+            RunLog.open(tmp_path, "s", "info") as log:
+        run_id = index.start_run("apply", config_hash(cfg()), psl.version, "h")
+        item = PlanItem(seq=1, msg_key="k", src_folder="INBOX", src_uid=1,
+                         src_uidvalidity=100,
+                         dst_folder="Crono_Archive/2009/amazon_com",
+                         reason="archive")
+        index.save_plan(run_id, [item], inbox_uidnext=500)
+
+        with pytest.raises(UnsafeServerError):
+            do_apply(_unsafe_mailbox(), index, cfg(), log, run_id)
+
+        # Nothing in execute()'s work -- select, fetch_identity, move, and
+        # the corresponding index writes -- should have run: the plan item
+        # is still pending, not done/failed/skipped.
+        assert len(index.pending_items(run_id)) == 1
 
 
 def test_do_plan_surveys_inbox_and_archive_then_persists(tmp_path, psl):
