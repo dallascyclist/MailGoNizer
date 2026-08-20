@@ -107,7 +107,7 @@ def execute(mailbox, index: Index, run_id: int, cfg: Config, log: RunLog,
                 continue
 
             uids = [i.src_uid for i in confirmed]
-            error = _move_with_retry(mailbox, uids, dst, cfg, log, reconnect, src)
+            error, mailbox = _move_with_retry(mailbox, uids, dst, cfg, log, reconnect, src)
 
             if error is None:
                 for item in confirmed:
@@ -128,14 +128,20 @@ def execute(mailbox, index: Index, run_id: int, cfg: Config, log: RunLog,
     return ExecutionResult(moved=moved, failed=failed, skipped=skipped)
 
 
-def _move_with_retry(mailbox, uids, dst, cfg, log, reconnect, src) -> str | None:
-    """Return None on success, or the verbatim final error text."""
+def _move_with_retry(mailbox, uids, dst, cfg, log, reconnect, src) -> tuple[str | None, object]:
+    """Attempt the move with retry/backoff.
+
+    Returns (error, mailbox): error is None on success, else the verbatim final
+    error text. mailbox is returned because a mid-retry reconnect replaces it
+    with a new object — the caller must rebind its own reference, since
+    rebinding this function's local parameter has no effect on the caller.
+    """
     attempts = max(1, cfg.execution.connect_retries)
     last = ""
     for attempt in range(1, attempts + 1):
         try:
             mailbox.move(uids, dst)
-            return None
+            return None, mailbox
         except TransientError as exc:
             last = str(exc)
             log.warn(f"attempt {attempt}/{attempts} moving {len(uids)} uids "
@@ -146,4 +152,4 @@ def _move_with_retry(mailbox, uids, dst, cfg, log, reconnect, src) -> str | None
             if reconnect is not None:
                 mailbox = reconnect()
                 mailbox.select(src, readonly=False)
-    return last
+    return last, mailbox
