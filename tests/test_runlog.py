@@ -87,15 +87,34 @@ def test_decisions_are_line_buffered_and_readable_before_close(tmp_path):
 
 def test_jsonl_open_failure_closes_narrative_handle(tmp_path):
     """If JSONL open fails, the narrative handle must be closed, not leaked."""
-    log_dir = tmp_path / "readonly"
+    from pathlib import Path
+    from unittest.mock import patch
+
+    log_dir = tmp_path / "logs"
     log_dir.mkdir()
-    # Make directory read-only to force open() to fail
-    log_dir.chmod(0o555)
-    try:
+    # Create a directory at the JSONL path to force IsADirectoryError on second open
+    jsonl_path = log_dir / "s.jsonl"
+    jsonl_path.mkdir()
+
+    # Wrap Path.open to record the narrative handle
+    recorded_handles = []
+    original_open = Path.open
+
+    def wrapped_open(self, *args, **kwargs):
+        handle = original_open(self, *args, **kwargs)
+        if self.suffix == ".log":
+            recorded_handles.append(handle)
+        return handle
+
+    # Patch Path.open to record narrative handle, let real error occur on JSONL
+    with patch.object(Path, "open", wrapped_open):
         try:
             RunLog.open(log_dir, "s", "info")
-            raise AssertionError("Expected OSError")
-        except OSError:
-            pass  # Expected
-    finally:
-        log_dir.chmod(0o755)
+            raise AssertionError("Expected IsADirectoryError")
+        except IsADirectoryError:
+            pass  # Expected: cannot open a directory as a file
+
+    # Verify the narrative handle was closed
+    assert len(recorded_handles) == 1, "Should have opened narrative once"
+    assert recorded_handles[0].closed is True, \
+        "Narrative handle must be closed before exception propagates"
