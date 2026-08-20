@@ -30,7 +30,13 @@ class RunLog:
     def open(cls, log_dir: Path, stamp: str, level: str = "info") -> RunLog:
         log_dir.mkdir(parents=True, exist_ok=True)
         narrative = (log_dir / f"{stamp}.log").open("a", encoding="utf-8")
-        jsonl = (log_dir / f"{stamp}.jsonl").open("a", encoding="utf-8")
+        try:
+            jsonl = (log_dir / f"{stamp}.jsonl").open(
+                "a", encoding="utf-8", buffering=1
+            )
+        except OSError:
+            narrative.close()
+            raise
         return cls(narrative, jsonl, _LEVELS.get(level.lower(), 20))
 
     def __enter__(self) -> RunLog:

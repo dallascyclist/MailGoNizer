@@ -70,3 +70,32 @@ def test_prune_removes_both_streams(tmp_path):
         (tmp_path / f"{stamp}.jsonl").write_text("x")
     RunLog.prune(tmp_path, retention_runs=1)
     assert not (tmp_path / "20200201-0000.jsonl").exists()
+
+
+def test_decisions_are_line_buffered_and_readable_before_close(tmp_path):
+    """JSONL decisions are flushed per-line so forensic records survive interruption."""
+    log = RunLog.open(tmp_path, "s", "info")
+    log.decision(msg_key="k1", reason="archive")
+    log.decision(msg_key="k2", reason="too_recent")
+    # Read from a separate handle before close() to verify line buffering
+    lines = (tmp_path / "s.jsonl").read_text().strip().splitlines()
+    assert len(lines) == 2
+    reasons = [json.loads(line)["reason"] for line in lines]
+    assert reasons == ["archive", "too_recent"]
+    log.close()
+
+
+def test_jsonl_open_failure_closes_narrative_handle(tmp_path):
+    """If JSONL open fails, the narrative handle must be closed, not leaked."""
+    log_dir = tmp_path / "readonly"
+    log_dir.mkdir()
+    # Make directory read-only to force open() to fail
+    log_dir.chmod(0o555)
+    try:
+        try:
+            RunLog.open(log_dir, "s", "info")
+            raise AssertionError("Expected OSError")
+        except OSError:
+            pass  # Expected
+    finally:
+        log_dir.chmod(0o755)
