@@ -16,7 +16,22 @@ def compute_msg_key(message_id: str | None, internaldate: datetime, size: int) -
     INTERNALDATE, flags, and size are preserved across both MOVE (RFC 6851)
     and COPY (RFC 3501), so this key survives relocation while still telling
     genuine duplicates apart.
+
+    internaldate must be timezone-aware. A naive datetime carries no defined
+    instant, so this function would otherwise have to guess whether it means
+    UTC or local time — and a wrong guess makes the key silently different
+    on a different host, defeating the whole point of a relocatable archive.
+    Raises ValueError rather than guessing.
     """
+    if internaldate.tzinfo is None:
+        raise ValueError(
+            "compute_msg_key requires a timezone-aware internaldate; got a "
+            f"naive datetime ({internaldate!r}). A naive datetime has no "
+            "defined instant, so guessing whether it means UTC or local "
+            "time would silently make the key host-dependent. Pass a "
+            "timezone-aware datetime (e.g. construct IMAPClient with "
+            "normalise_times=False)."
+        )
     mid = (message_id or "").strip()
     stamp = internaldate.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
     return hashlib.sha256(f"{mid}\x00{stamp}\x00{size}".encode()).hexdigest()

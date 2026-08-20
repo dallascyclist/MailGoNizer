@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-import os
-import time
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
+
+import pytest
 
 from mailgonizer.records import compute_msg_key
 
@@ -13,46 +13,29 @@ UTC = timezone.utc
 
 
 def test_utc_normalization_same_instant_different_timezones_same_key():
-    # 17:00 UTC on 2020-06-01 is 12:00 in Chicago (UTC-5, CDT in June).
+    """This is the whole point of normalizing to UTC before hashing: the
+    archive directory is designed to be relocatable (tarred up and moved to
+    a mail host in a different timezone later), so the same message must
+    key identically no matter which zone produced its internaldate.
+    """
+    # 17:00 UTC on 2020-06-01 is 12:00 in Chicago (UTC-5, CDT in June) — two
+    # independently constructed, differently-zoned representations of one
+    # instant, not one derived from the other.
     utc_dt = datetime(2020, 6, 1, 17, 0, 0, tzinfo=UTC)
     chicago_dt = datetime(2020, 6, 1, 12, 0, 0, tzinfo=ZoneInfo("America/Chicago"))
     assert utc_dt == chicago_dt  # sanity: genuinely the same instant
     assert compute_msg_key("m1", utc_dt, 100) == compute_msg_key("m1", chicago_dt, 100)
 
 
-def test_naive_internaldate_is_treated_as_local_system_time():
-    """Locked-in, documented behaviour: compute_msg_key does not itself
-    enforce tz-awareness (that contract lives on HeaderRecord.internaldate,
-    which is documented '# tz-aware'). A naive datetime falls through to
-    datetime.astimezone()'s own default: it is assumed to already be in the
-    local system timezone. This test pins that fallback down explicitly, by
-    fixing the system TZ for its duration, so a future refactor can't
-    silently change it (e.g. by assuming naive datetimes are UTC) without a
-    test failing.
+def test_naive_internaldate_is_rejected():
+    """A naive internaldate must never be silently guessed at (as UTC or as
+    local time) — either guess can make the key differ by host, which is
+    exactly the failure this key exists to prevent. compute_msg_key must
+    fail loudly instead.
     """
-    original_tz = os.environ.get("TZ")
-    os.environ["TZ"] = "America/Chicago"
-    time.tzset()
-    try:
-        naive = datetime(2020, 6, 1, 12, 0, 0)
-        aware_local = datetime(2020, 6, 1, 12, 0, 0, tzinfo=ZoneInfo("America/Chicago"))
-        aware_utc_same_wallclock = datetime(2020, 6, 1, 12, 0, 0, tzinfo=UTC)
-
-        key_naive = compute_msg_key("m1", naive, 100)
-        key_local_aware = compute_msg_key("m1", aware_local, 100)
-        key_utc_same_wallclock = compute_msg_key("m1", aware_utc_same_wallclock, 100)
-
-        # Naive input is treated as local system time...
-        assert key_naive == key_local_aware
-        # ...and therefore differs from treating the same wall-clock digits
-        # as already being UTC.
-        assert key_naive != key_utc_same_wallclock
-    finally:
-        if original_tz is None:
-            os.environ.pop("TZ", None)
-        else:
-            os.environ["TZ"] = original_tz
-        time.tzset()
+    naive = datetime(2020, 6, 1, 12, 0, 0)
+    with pytest.raises(ValueError, match="timezone-aware"):
+        compute_msg_key("m1", naive, 100)
 
 
 def test_message_id_none_and_empty_string_produce_the_same_key():
