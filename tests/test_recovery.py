@@ -5,7 +5,7 @@ import json
 import pytest
 
 from mailgonizer.config import Config, ExecutionConfig, ServerConfig
-from mailgonizer.imap import Capabilities
+from mailgonizer.imap import Capabilities, UnsafeServerError
 from mailgonizer.index import Index
 from mailgonizer.records import PlanItem
 from mailgonizer.recovery import export_index, undo_run
@@ -41,6 +41,16 @@ class FakeMailbox:
 
     def move(self, uids, dst):
         self.moves.append((tuple(uids), dst))
+
+
+class UnsafeMailbox(FakeMailbox):
+    """Reports neither MOVE nor UIDPLUS -- exactly what assert_safe() refuses."""
+
+    def capabilities(self):
+        return Capabilities("/", False, False, {})
+
+    def assert_safe(self):
+        raise UnsafeServerError("neither MOVE nor UIDPLUS")
 
 
 def cfg():
@@ -110,6 +120,19 @@ def test_undo_does_not_reverse_promotions(prepared):
     undo_run(mb, index, cfg(), log, run_id)
 
     assert index.known_promotions() == {(2019, "amazon.com", "orders")}
+
+
+def test_undo_refuses_an_unsafe_server_and_does_nothing(prepared):
+    index, log, run_id = prepared
+    before = index.conn.execute("SELECT COUNT(*) FROM moves").fetchone()[0]
+    mb = UnsafeMailbox({"Crono_Archive/2019/a": {50: "k1", 51: "k2"}})
+
+    with pytest.raises(UnsafeServerError):
+        undo_run(mb, index, cfg(), log, run_id)
+
+    assert mb.moves == []
+    after = index.conn.execute("SELECT COUNT(*) FROM moves").fetchone()[0]
+    assert after == before
 
 
 def test_undo_of_a_run_with_no_moves_is_a_no_op(tmp_path):

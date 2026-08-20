@@ -27,6 +27,7 @@ def undo_run(mailbox, index: Index, cfg: Config, log: RunLog,
     which works on any server and needs nothing the log does not hold.
     Promotions are NOT reversed: the folders remain and the ratchet holds.
     """
+    mailbox.assert_safe()
     moves = index.moves_for_run(run_id)
     if not moves:
         log.info(f"run {run_id} moved nothing; undo is a no-op")

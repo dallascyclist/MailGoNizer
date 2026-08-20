@@ -215,7 +215,7 @@ def main(argv: list[str] | None = None, mailbox_factory=None) -> int:
                 return EXIT_OK if outcome.failed == 0 else EXIT_WITH_FAILURES
 
             if args.command == "undo":
-                outcome = recovery.undo_run(mailbox, index, cfg, log, args.run)
+                recovery.undo_run(mailbox, index, cfg, log, args.run)
                 RunLog.prune(log_dir, cfg.logging.retention_runs)
                 return EXIT_OK
 
