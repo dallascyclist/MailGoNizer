@@ -1,3 +1,4 @@
+import sqlite3
 from datetime import datetime, timezone
 
 import pytest
@@ -111,6 +112,41 @@ def test_mark_done_on_an_unknown_item_raises_and_writes_nothing(idx):
     assert idx.conn.execute("SELECT COUNT(*) FROM moves").fetchone()[0] == 0
 
 
+def test_mark_done_rolls_back_the_state_change_if_the_move_log_insert_fails(idx, monkeypatch):
+    """The UPDATE and the INSERT must succeed or fail together.
+
+    If the state flip committed while the move-log append did not, the item
+    would read as done with no record of where it went, and the next run's
+    idempotency check (which consults `moves`) would move it again.
+    """
+    run_id = idx.start_run("apply", "c", "p", "h")
+    idx.save_plan(run_id, [PlanItem(1, "k1", "INBOX", 10, 100, "dst", "archive")],
+                  inbox_uidnext=1)
+
+    real_conn = idx.conn
+
+    class _FailOnMovesInsert:
+        def execute(self, sql, *args, **kwargs):
+            if sql.startswith("INSERT INTO moves"):
+                raise sqlite3.IntegrityError("simulated failure")
+            return real_conn.execute(sql, *args, **kwargs)
+
+        def __getattr__(self, name):
+            return getattr(real_conn, name)
+
+    monkeypatch.setattr(idx, "conn", _FailOnMovesInsert())
+    with pytest.raises(sqlite3.IntegrityError):
+        idx.mark_done(run_id, seq=1, message_id="<a@b>", dst_uid=77)
+    monkeypatch.undo()
+
+    row = idx.conn.execute(
+        "SELECT state FROM plan_items WHERE run_id=? AND seq=?", (run_id, 1)
+    ).fetchone()
+    assert row["state"] == "pending"
+    assert idx.conn.execute("SELECT COUNT(*) FROM moves").fetchone()[0] == 0
+    assert [p.seq for p in idx.pending_items(run_id)] == [1]
+
+
 def test_failures_record_the_verbatim_server_response(idx):
     run_id = idx.start_run("apply", "c", "p", "h")
     idx.save_plan(run_id, [PlanItem(1, "k1", "INBOX", 10, 100, "dst", "archive")],
@@ -146,3 +182,33 @@ def test_moves_for_run_returns_reversal_material(idx):
     moves = idx.moves_for_run(run_id)
     assert len(moves) == 1
     assert (moves[0]["src_folder"], moves[0]["dst_folder"]) == ("INBOX", "dst")
+
+
+def test_record_folder_inserts_a_row(idx):
+    run_id = idx.start_run("run", "c", "p", "h")
+    idx.record_folder("Crono_Archive/2019/amazon_com", run_id)
+    row = idx.conn.execute(
+        "SELECT * FROM folders WHERE name=?", ("Crono_Archive/2019/amazon_com",)
+    ).fetchone()
+    assert row is not None
+    assert row["created_run"] == run_id
+    assert row["first_seen"] is not None
+
+
+def test_record_folder_is_idempotent(idx):
+    run_id = idx.start_run("run", "c", "p", "h")
+    idx.record_folder("Crono_Archive/2019/amazon_com", run_id)
+    idx.record_folder("Crono_Archive/2019/amazon_com", run_id)
+    count = idx.conn.execute(
+        "SELECT COUNT(*) FROM folders WHERE name=?", ("Crono_Archive/2019/amazon_com",)
+    ).fetchone()[0]
+    assert count == 1
+
+
+def test_clear_cache_removes_recorded_folders(idx):
+    """folders is Layer 1 (rebuildable cache), so clear_cache must empty it."""
+    run_id = idx.start_run("run", "c", "p", "h")
+    idx.record_folder("Crono_Archive/2019/amazon_com", run_id)
+    idx.clear_cache()
+    count = idx.conn.execute("SELECT COUNT(*) FROM folders").fetchone()[0]
+    assert count == 0
