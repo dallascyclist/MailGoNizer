@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Resolve our own root without readlink -f, which does not exist on macOS.
+set -euo pipefail
+
+SELF="$0"
+while [ -L "$SELF" ]; do
+    LINK="$(ls -ld -- "$SELF" | sed -e 's/.* -> //')"
+    case "$LINK" in
+        /*) SELF="$LINK" ;;
+        *)  SELF="$(dirname "$SELF")/$LINK" ;;
+    esac
+done
+BIN_DIR="$(cd "$(dirname "$SELF")" && pwd -P)"
+ROOT="$(cd "$BIN_DIR/.." && pwd -P)"
+
+if [ ! -x "$ROOT/venv/bin/python" ]; then
+    echo "mailgonizer: no venv at $ROOT/venv — run $ROOT/install.sh first" >&2
+    exit 1
+fi
+
+MAILGONIZER_ROOT="$ROOT" exec "$ROOT/venv/bin/python" -m mailgonizer.cli "$@"

@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# Cron entry point: single-instance, quiet on success, loud on failure.
+set -euo pipefail
+
+SELF="$0"
+while [ -L "$SELF" ]; do
+    LINK="$(ls -ld -- "$SELF" | sed -e 's/.* -> //')"
+    case "$LINK" in
+        /*) SELF="$LINK" ;;
+        *)  SELF="$(dirname "$SELF")/$LINK" ;;
+    esac
+done
+BIN_DIR="$(cd "$(dirname "$SELF")" && pwd -P)"
+ROOT="$(cd "$BIN_DIR/.." && pwd -P)"
+LOCK="$ROOT/db/.run.lock"
+
+mkdir -p "$ROOT/db"
+exec 9>"$LOCK"
+if ! flock -n 9; then
+    echo "mailgonizer-cron: another run holds $LOCK; exiting" >&2
+    exit 1
+fi
+
+# Exit code passes through: 0 clean, 1 fatal, 2 completed with failures.
+# Cron mails stderr/stdout on non-zero, which is the intended notification.
+"$BIN_DIR/mailgonizer" run "$@"

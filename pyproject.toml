@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mailgonizer"
+version = "0.1.0"
+description = "Archive an unorganized IMAP inbox into a browsable year/sender tree"
+requires-python = ">=3.11"
+dependencies = [
+    "IMAPClient>=3.0",
+    "PyYAML>=6.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "ruff>=0.5"]
+
+[tool.setuptools]
+package-dir = {"" = "lib"}
+
+[tool.setuptools.packages.find]
+where = ["lib"]
+
+[tool.setuptools.package-data]
+mailgonizer = ["data/*.dat"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["integration: requires a live Dovecot container"]
+addopts = "-m 'not integration'"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "B", "BLE", "S110", "S112"]
