@@ -164,6 +164,28 @@ def test_dotless_domain_survives(psl):
     assert s.domain == "localhost"
 
 
+@pytest.mark.parametrize(
+    "from_value,expected_kind,expected_local,expected_domain",
+    [
+        # Quoted local part legitimately embeds an '@'; rpartition on the
+        # *last* '@' is what keeps this correct — a naive partition() would
+        # split too early and mangle both the local part and the domain.
+        ('"weird@local"@example.com', "domain", '"weird@local"', "example.com"),
+        # Malformed, unquoted, multiple '@' signs: the header parser itself
+        # can't make an address out of this and reduces it to '<>', so it
+        # never reaches rpartition at all — falls through to unknown.
+        ("a@b@example.com", "unknown", None, None),
+    ],
+)
+def test_addresses_with_more_than_one_at_sign(psl, from_value, expected_kind,
+                                               expected_local, expected_domain):
+    s = derive_sender(parse(f"From: {from_value}\n\n"), psl)
+    assert s.kind == expected_kind
+    if expected_kind == "domain":
+        assert s.local == expected_local
+        assert s.domain == expected_domain
+
+
 # --- destination paths ----------------------------------------------------
 
 def test_archive_path_for_unpromoted_domain(cfg, psl):
