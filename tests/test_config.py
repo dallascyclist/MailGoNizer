@@ -81,3 +81,22 @@ def test_never_archive_is_coerced_to_a_tuple(tmp_path, monkeypatch):
     cfg = load_config(write(tmp_path, text))
     assert cfg.exclusions.never_archive == ("a@b.com",)
     assert isinstance(cfg.exclusions.never_archive, tuple)
+
+
+def test_never_archive_rejects_a_bare_string(tmp_path, monkeypatch):
+    monkeypatch.setenv("MAILGONIZER_PASSWORD", "hunter2")
+    text = MINIMAL + "exclusions:\n  never_archive: alice@example.com\n"
+    with pytest.raises(ConfigError, match="never_archive"):
+        load_config(write(tmp_path, text))
+
+
+def test_never_archive_rejects_a_null_value(tmp_path, monkeypatch):
+    monkeypatch.setenv("MAILGONIZER_PASSWORD", "hunter2")
+    text = MINIMAL + "exclusions:\n  never_archive:\n"
+    with pytest.raises(ConfigError, match="never_archive"):
+        load_config(write(tmp_path, text))
+
+
+def test_non_mapping_server_value_is_rejected(tmp_path):
+    with pytest.raises(ConfigError, match="server"):
+        load_config(write(tmp_path, "server: not-a-mapping\n"))

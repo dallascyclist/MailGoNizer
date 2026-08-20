@@ -123,7 +123,12 @@ def _build_section(name: str, raw: dict, cls: type):
     # fields are immutable.
     for f in cls.__dataclass_fields__.values():
         if f.name in given and isinstance(f.type, str) and f.type.startswith("tuple"):
-            given[f.name] = tuple(given[f.name])
+            value = given[f.name]
+            if not isinstance(value, (list, tuple)):
+                raise ConfigError(
+                    f"{name}.{f.name} must be a list, got {type(value).__name__}"
+                )
+            given[f.name] = tuple(value)
     return cls(**given)
 
 
