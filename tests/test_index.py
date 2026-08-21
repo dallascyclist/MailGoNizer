@@ -103,6 +103,20 @@ def test_mark_done_writes_state_and_move_log_in_one_transaction(idx):
     assert idx.already_moved("k1")
 
 
+def test_already_moved_is_scoped_to_destination(idx):
+    """A message already moved to one folder must still be free to move to a
+    *different* folder later — a promotion backfill relies on exactly this:
+    the flat per-domain folder is not the newly-promoted per-sender one."""
+    run_id = idx.start_run("apply", "c", "p", "h")
+    idx.save_plan(run_id, [PlanItem(1, "k1", "INBOX", 10, 100, "A", "archive")],
+                  inbox_uidnext=1)
+    idx.mark_done(run_id, seq=1, message_id="<a@b>", dst_uid=77)
+
+    assert idx.already_moved("k1", "A")
+    assert not idx.already_moved("k1", "B")
+    assert idx.already_moved("k1")  # no destination given: any prior move matches
+
+
 def test_mark_done_on_an_unknown_item_raises_and_writes_nothing(idx):
     run_id = idx.start_run("apply", "c", "p", "h")
     idx.save_plan(run_id, [PlanItem(1, "k1", "INBOX", 10, 100, "dst", "archive")],

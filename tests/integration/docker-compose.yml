@@ -1,0 +1,14 @@
+services:
+  dovecot-slash:
+    image: dovecot/dovecot:2.3.21
+    ports:
+      - "10143:143"
+    volumes:
+      - ./dovecot-slash.conf:/etc/dovecot/dovecot.conf:ro
+
+  dovecot-dot:
+    image: dovecot/dovecot:2.3.21
+    ports:
+      - "10144:143"
+    volumes:
+      - ./dovecot-dot.conf:/etc/dovecot/dovecot.conf:ro

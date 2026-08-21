@@ -262,9 +262,23 @@ class Index:
 
     # --- move log ---------------------------------------------------------
 
-    def already_moved(self, msg_key: str) -> bool:
+    def already_moved(self, msg_key: str, dst_folder: str | None = None) -> bool:
+        """Whether *msg_key* has already been recorded as moved.
+
+        Scoped to *dst_folder* when given: a message that already reached
+        one destination must still be free to move again to a *different*
+        one later (a promotion backfill moving mail out of the flat
+        per-domain folder into a newly-promoted per-sender subfolder is
+        exactly this case). Without *dst_folder*, matches any prior move —
+        for callers that only care whether the message has moved at all.
+        """
+        if dst_folder is None:
+            return self.conn.execute(
+                "SELECT 1 FROM moves WHERE msg_key=? LIMIT 1", (msg_key,)
+            ).fetchone() is not None
         return self.conn.execute(
-            "SELECT 1 FROM moves WHERE msg_key=? LIMIT 1", (msg_key,)
+            "SELECT 1 FROM moves WHERE msg_key=? AND dst_folder=? LIMIT 1",
+            (msg_key, dst_folder),
         ).fetchone() is not None
 
     def moves_for_run(self, run_id: int) -> list[sqlite3.Row]:

@@ -4,8 +4,13 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")" && pwd -P)"
 PYTHON="${PYTHON:-python3}"
 
-"$PYTHON" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' || {
-    echo "install: Python 3.11 or newer required, got $($PYTHON --version)" >&2
+"$PYTHON" -c 'import sys; sys.exit(0 if (3, 11) <= sys.version_info < (3, 14) else 1)' || {
+    echo "install: Python 3.11, 3.12, or 3.13 required, got $($PYTHON --version)." \
+         "IMAPClient 3.1.0 (the only release on PyPI) cannot open a real IMAP" \
+         "connection under 3.14: Python 3.14's imaplib made IMAP4.file a" \
+         "read-only property, and imapclient's IMAP4WithTimeout.open() still" \
+         "assigns self.file directly, so every connection fails with" \
+         "AttributeError before login is ever attempted." >&2
     exit 1
 }
 

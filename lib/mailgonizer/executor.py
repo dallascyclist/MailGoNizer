@@ -76,7 +76,7 @@ def execute(mailbox, index: Index, run_id: int, cfg: Config, log: RunLog,
             # already happened, even if the plan is stale.
             live: list[PlanItem] = []
             for item in batch:
-                if index.already_moved(item.msg_key):
+                if index.already_moved(item.msg_key, item.dst_folder):
                     index.mark_skipped(run_id, item.seq, "already_moved")
                     log.decision(msg_key=item.msg_key, seq=item.seq,
                                  state="skipped", reason="already_moved")

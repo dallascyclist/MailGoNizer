@@ -156,6 +156,24 @@ def test_an_already_moved_message_is_not_moved_twice(setup):
     assert result.skipped == 1 and mb.moves == []
 
 
+def test_a_message_already_moved_once_can_still_move_to_a_new_destination(setup):
+    """Regression: a promotion backfill moves mail that a previous run already
+    archived once (INBOX -> flat domain folder) onward to a newly-promoted
+    per-sender folder. That second, different-destination move must happen —
+    `already_moved` must not treat "moved somewhere, ever" as "done forever"."""
+    index, log, first_run = setup
+    plan(index, first_run, [PlanItem(1, "k1", "INBOX", 10, 100, "flat", "archive")])
+    index.mark_done(first_run, 1, "<a@b>", 5)
+
+    second_run = index.start_run("apply", "c", "p", "h")
+    plan(index, second_run, [PlanItem(1, "k1", "flat", 10, 100, "promoted", "backfill")])
+    mb = FakeMailbox(identities={10: "k1"})
+    result = execute(mb, index, second_run, cfg(), log)
+
+    assert result.moved == 1 and result.skipped == 0
+    assert mb.moves == [((10,), "promoted")]
+
+
 def test_a_transient_failure_is_retried_then_succeeds(setup, monkeypatch):
     index, log, run_id = setup
     plan(index, run_id, [PlanItem(1, "k1", "INBOX", 10, 100, "dst", "archive")])
