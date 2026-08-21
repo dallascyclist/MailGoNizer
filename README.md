@@ -52,7 +52,7 @@ launch. Runs monthly via cron; safe to run by hand too.
 ## Install
 
 ```bash
-git clone <repo> mailgonizer
+git clone git@github.com:dallascyclist/MailGoNizer.git mailgonizer
 cd mailgonizer
 ./install.sh
 $EDITOR etc/config.yaml
@@ -142,12 +142,70 @@ jq -r '.reason' log/20260819-2045.jsonl | sort | uniq -c | sort -rn
 and `already_moved`/`vanished`/`identity_mismatch`/`uidvalidity_changed`/
 `move_failed` (execution-time skips and failures).
 
-## Design
+## Design notes
 
-See `docs/superpowers/specs/2026-08-19-mailgonizer-design.md` for the full
-design: sender-key precedence and escaping, the durable `msg_key`, the
-three-layer index, the error taxonomy, exit codes, and configuration
-reference.
+**Folder names are escaped, not passed through.** Each sender-derived path
+component is lowercased (IMAP folder names are case-sensitive on nearly every
+server, so `Orders` and `orders` would otherwise become two folders), has `.`
+replaced by `naming.domain_separator` (default `_`), has anything outside
+`[a-z0-9_-]` replaced by `_`, has runs of `_` collapsed, and is truncated to
+`naming.max_component_length` with a short hash appended. The dot substitution
+is the load-bearing part: `.` is the hierarchy delimiter under Dovecot's
+Maildir++ layout, so a folder literally named `amazon.com` would shatter into
+`amazon/com`. Names produced this way copy byte-for-byte between servers, which
+matters if you ever migrate. Folder names *you* configure — `archive.root`,
+`lists_folder`, `unknown_folder` — are used verbatim.
+
+**Registrable domains come from a vendored Public Suffix List**
+(`lib/mailgonizer/data/public_suffix_list.dat`), not fetched at runtime. A run
+that resolved senders against a different list than a previous run could
+re-bucket a domain and silently split a folder, so the version in use is
+recorded per run and `check` warns if it changed. Updating the list is a
+deliberate, visible act.
+
+**The index has three layers with different lifetimes.** `messages` and
+`folders` are a rebuildable cache — `rebuild-index` discards and rescans them.
+`moves`, `promotions`, and `runs` are the permanent record. `plan_items` is the
+per-run working plan, which is what makes `apply` resumable: an interrupted run
+picks up where it stopped, and because the move log is consulted first, a
+message already moved is never moved twice even if the plan is stale.
+
+**UIDs are never identity.** A UID is per-folder and changes when a message
+moves, and `UIDVALIDITY` can void an entire folder's UIDs at any time. UIDs
+appear only in `plan_items`, always paired with the `UIDVALIDITY` they were
+observed under, and every batch re-verifies each message's `msg_key` against
+the server immediately before moving it. A mismatch is skipped, never moved —
+which is what makes it safe to review a plan on Monday and apply it on Friday.
+
+**Errors are classified, never swallowed.** Fatal errors (bad config, auth
+failure, `UIDVALIDITY` changed, an unsafe server) abort with nothing partial.
+Transient errors retry with exponential backoff and re-verify `UIDVALIDITY`
+after reconnecting. Per-item failures record the server's verbatim response and
+let the run continue. No bare `except:` and no `except Exception: pass` appear
+anywhere; CI enforces this.
+
+**Two safety properties are structural rather than conventional.** Header
+fetches always use `BODY.PEEK`, so surveying never sets `\Seen` — a `make
+check-peek` grep gate and an integration test against a live server both guard
+it. And `assert_safe()` runs inside `Mailbox.move()` itself, not only at the
+call sites, so no code path can perform a destructive write against a server
+that advertises neither `MOVE` nor `UIDPLUS`.
+
+## Testing
+
+```bash
+make test           # unit tests
+make lint           # ruff, plus the non-PEEK BODY[ fetch guard
+make integration-up # two Dovecot containers, '/' and '.' separators
+make integration    # integration suite against them
+make integration-down
+```
+
+The integration suite runs against real Dovecot rather than mocks, because
+three properties cannot be verified any other way: that surveying never sets
+`\Seen`, that the `COPY` fallback never expunges unrelated `\Deleted` mail,
+and that a server using `.` as its hierarchy delimiter still produces a flat
+`amazon_com` folder rather than a shattered `amazon/com` tree.
 
 ## License
 
