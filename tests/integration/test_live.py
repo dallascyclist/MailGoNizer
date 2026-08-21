@@ -34,20 +34,31 @@ def test_capabilities_are_discovered(mailbox):
     mailbox.assert_safe()
 
 
-def test_survey_never_sets_the_seen_flag(mailbox, slash_cfg, psl, tmp_path):
+def test_survey_never_sets_the_seen_flag(mailbox, slash_cfg, psl, tmp_path,
+                                          monkeypatch):
     """A BODY.PEEK that loses its PEEK is a one-character diff with
-    irreversible consequences. This is the assertion that catches it."""
+    irreversible consequences. But `fetch_headers` also opens its folder
+    read-only (EXAMINE) before fetching, and a server refusing to persist
+    flag changes under EXAMINE would mask a missing PEEK just as well --
+    so this forces the exact same fetch through a read-write SELECT
+    instead, making PEEK the only thing standing between survey and
+    \\Seen."""
     seed(mailbox, count=5)
     mailbox.select("INBOX", readonly=True)
     before = mailbox.client.fetch(mailbox.client.search(["ALL"]), [b"FLAGS"])
     assert all(b"\\Seen" not in data[b"FLAGS"] for data in before.values())
 
+    real_select = mailbox.select
+    monkeypatch.setattr(
+        mailbox, "select",
+        lambda folder, readonly=True: real_select(folder, readonly=False),
+    )
     list(mailbox.fetch_headers("INBOX"))
+    monkeypatch.undo()
 
     mailbox.select("INBOX", readonly=True)
     after = mailbox.client.fetch(mailbox.client.search(["ALL"]), [b"FLAGS"])
-    assert {uid: data[b"FLAGS"] for uid, data in before.items()} == \
-           {uid: data[b"FLAGS"] for uid, data in after.items()}
+    assert all(b"\\Seen" not in data[b"FLAGS"] for data in after.values())
 
 
 def test_end_to_end_archive(mailbox, slash_cfg, psl, tmp_path):
@@ -118,33 +129,82 @@ def test_copy_fallback_does_not_expunge_unrelated_deleted_mail(
         Capabilities(caps.delimiter, has_move=False, has_uidplus=True,
                      special_use=caps.special_use),
     )
+
+    # Prove the fallback path actually runs, not just that the victim
+    # survives -- a real MOVE would leave the victim untouched too, so
+    # without this the test would pass even if the fallback silently
+    # stopped firing.
+    copies: list[tuple[object, str]] = []
+    expunges: list[object] = []
+    real_copy = mailbox.client.copy
+    real_expunge = mailbox.client.expunge
+    monkeypatch.setattr(
+        mailbox.client, "copy",
+        lambda messages, folder: (copies.append((messages, folder)),
+                                   real_copy(messages, folder))[1],
+    )
+    monkeypatch.setattr(
+        mailbox.client, "expunge",
+        lambda messages=None: (expunges.append(messages),
+                                real_expunge(messages=messages))[1],
+    )
+
     run_once(mailbox, slash_cfg, psl, tmp_path)
+
+    assert copies, "the COPY fallback never ran -- this test proved nothing"
+    assert expunges and all(m is not None for m in expunges), \
+        "a bare, folder-wide EXPUNGE was issued instead of a UID-scoped one"
 
     mailbox.select("INBOX", readonly=True)
     assert mailbox.client.search(["HEADER", "MESSAGE-ID", victim_id]), \
         "the soft-deleted victim was expunged by the COPY fallback"
 
 
-def test_resumption_after_interruption(mailbox, slash_cfg, psl, tmp_path):
+def test_resumption_after_interruption(mailbox, slash_cfg, psl, tmp_path,
+                                        monkeypatch):
+    """A real interruption, not just a small batch size: `mailbox.move`
+    dies partway through the plan (a `KeyboardInterrupt`, uncaught by the
+    executor's `TransientError`-only retry logic, propagates straight out
+    of `do_apply`). The next `do_apply` call must pick up exactly where the
+    last one left off -- nothing moved twice, nothing left behind."""
     seed(mailbox, count=10)
     with Index.open(tmp_path / "t.sqlite") as index, \
             RunLog.open(tmp_path, "s", "debug") as log:
         run_id, _result = do_plan(mailbox, index, slash_cfg, psl, log,
                                   datetime.now(timezone.utc))
 
-        # Simulate a kill partway through by executing in small batches.
         capped = dataclasses.replace(
             slash_cfg,
             execution=dataclasses.replace(slash_cfg.execution, batch_size=4),
         )
-        partial = do_apply(mailbox, index, capped, log, run_id)
-        assert partial.moved == 10 or index.pending_items(run_id)
+
+        real_move = mailbox.move
+        calls = {"n": 0}
+
+        def die_after_first_batch(uids, dst):
+            calls["n"] += 1
+            if calls["n"] > 1:
+                raise KeyboardInterrupt("simulated kill")
+            return real_move(uids, dst)
+
+        monkeypatch.setattr(mailbox, "move", die_after_first_batch)
+        with pytest.raises(KeyboardInterrupt):
+            do_apply(mailbox, index, capped, log, run_id)
+        monkeypatch.undo()
+
+        pending_after_kill = index.pending_items(run_id)
+        assert 0 < len(pending_after_kill) < 10, \
+            "the simulated kill should leave some, but not all, work undone"
 
         rest = do_apply(mailbox, index, slash_cfg, log, run_id)
+        assert rest.moved == len(pending_after_kill)
+        assert not index.pending_items(run_id)
 
     mailbox.select("INBOX", readonly=True)
     assert mailbox.client.search(["ALL"]) == []
-    assert partial.moved + rest.moved == 10
+    dest = f"Crono_Archive/{OLD.year}/amazon_com"
+    mailbox.select(dest, readonly=True)
+    assert len(mailbox.client.search(["ALL"])) == 10
 
 
 def test_undo_returns_everything_to_the_inbox(mailbox, slash_cfg, psl, tmp_path):

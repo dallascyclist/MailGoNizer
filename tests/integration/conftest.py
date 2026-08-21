@@ -15,9 +15,19 @@ OLD = NOW - timedelta(days=400)
 
 
 def _reachable(port: int) -> bool:
-    with socket.socket() as sock:
-        sock.settimeout(1)
-        return sock.connect_ex(("127.0.0.1", port)) == 0
+    """True only once the server is actually answering IMAP, not merely
+    accepting TCP connections. Docker's port forwarder can accept on the
+    published port slightly before the container's imap-login process is
+    ready to speak, so a bare connect() can look up before there is a
+    greeting to read -- and this fixture's job is to skip cleanly, not to
+    let a half-up server fail the test with a connection error instead."""
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=1) as sock:
+            sock.settimeout(1)
+            greeting = sock.recv(64)
+    except OSError:
+        return False
+    return greeting.startswith(b"* OK")
 
 
 def _require(port: int) -> None:

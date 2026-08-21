@@ -263,23 +263,29 @@ class Index:
     # --- move log ---------------------------------------------------------
 
     def already_moved(self, msg_key: str, dst_folder: str | None = None) -> bool:
-        """Whether *msg_key* has already been recorded as moved.
+        """Whether *msg_key*'s most recent recorded move landed at *dst_folder*.
 
-        Scoped to *dst_folder* when given: a message that already reached
+        Only the most recent move counts, not "ever": a message already at
         one destination must still be free to move again to a *different*
         one later (a promotion backfill moving mail out of the flat
         per-domain folder into a newly-promoted per-sender subfolder is
-        exactly this case). Without *dst_folder*, matches any prior move —
-        for callers that only care whether the message has moved at all.
+        exactly this case). Using the most recent row rather than "does a
+        matching row exist anywhere in history" also means a message `undo`
+        has reversed back to the inbox (which appends a reversal row rather
+        than rewriting history — see `append_move`) is free to be
+        re-archived to that same destination later; an "ever" check would
+        block it forever. Without *dst_folder*, matches any prior move at
+        all — for callers that only care whether the message has moved.
         """
         if dst_folder is None:
             return self.conn.execute(
                 "SELECT 1 FROM moves WHERE msg_key=? LIMIT 1", (msg_key,)
             ).fetchone() is not None
-        return self.conn.execute(
-            "SELECT 1 FROM moves WHERE msg_key=? AND dst_folder=? LIMIT 1",
-            (msg_key, dst_folder),
-        ).fetchone() is not None
+        row = self.conn.execute(
+            "SELECT dst_folder FROM moves WHERE msg_key=? ORDER BY id DESC LIMIT 1",
+            (msg_key,),
+        ).fetchone()
+        return row is not None and row["dst_folder"] == dst_folder
 
     def moves_for_run(self, run_id: int) -> list[sqlite3.Row]:
         return list(self.conn.execute(
