@@ -184,6 +184,17 @@ class Mailbox:
 
     # --- reads ------------------------------------------------------------
 
+    def message_count(self, folder: str) -> int:
+        """EXISTS for a folder, so a long survey can report a denominator.
+
+        One extra EXAMINE per folder, which is nothing against fetching a
+        hundred thousand headers, and it is what turns an indefinite wait into
+        a percentage.
+        """
+        info = self.client.select_folder(folder, readonly=True)
+        self._selected = folder
+        return int(info.get(b"EXISTS", 0))
+
     def _search_all_uids(self, uidnext: int) -> list[int]:
         """Every UID in the selected folder, gathered in bounded windows.
 

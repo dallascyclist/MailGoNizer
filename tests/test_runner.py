@@ -195,6 +195,9 @@ def test_do_plan_surveys_inbox_and_archive_then_persists(tmp_path, psl):
         def select(self, folder, readonly=True):
             return 100, 500
 
+        def message_count(self, folder):
+            return sum(1 for _ in self.fetch_headers(folder))
+
         def fetch_headers(self, folder):
             if folder == "INBOX":
                 yield record("From: orders@amazon.com\nMessage-ID: <n1@x>\n"
@@ -229,6 +232,9 @@ def test_new_promotions_are_persisted_by_do_plan(tmp_path, psl):
 
         def select(self, folder, readonly=True):
             return 100, 500
+
+        def message_count(self, folder):
+            return sum(1 for _ in self.fetch_headers(folder))
 
         def fetch_headers(self, folder):
             if folder != "INBOX":
@@ -283,6 +289,9 @@ def _in_place_mailbox():
 
         def select(self, folder, readonly=True):
             return 100, 500
+
+        def message_count(self, folder):
+            return sum(1 for _ in self.fetch_headers(folder))
 
         def fetch_headers(self, folder):
             if folder == "INBOX":

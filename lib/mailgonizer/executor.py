@@ -13,7 +13,7 @@ from mailgonizer.config import Config
 from mailgonizer.imap import TransientError
 from mailgonizer.index import Index
 from mailgonizer.records import PlanItem
-from mailgonizer.runlog import RunLog
+from mailgonizer.runlog import Progress, RunLog
 
 
 @dataclass(frozen=True)
@@ -39,6 +39,10 @@ def execute(mailbox, index: Index, run_id: int, cfg: Config, log: RunLog,
         return ExecutionResult()
 
     moved = failed = skipped = 0
+    # Applying a first run moves tens of thousands of messages one batch at a
+    # time. Report against the plan's own item count so the operator can see
+    # it advancing rather than guessing whether it has stalled.
+    progress = Progress(log, "EXECUTE", total=len(items))
     validated: dict[str, bool] = {}
 
     for (src, dst), group in _group(items).items():
@@ -78,6 +82,7 @@ def execute(mailbox, index: Index, run_id: int, cfg: Config, log: RunLog,
                     log.decision(msg_key=item.msg_key, seq=item.seq,
                                  state="skipped", reason="already_moved")
                     skipped += 1
+                    progress.tick()
                 else:
                     live.append(item)
             if not live:
@@ -92,12 +97,14 @@ def execute(mailbox, index: Index, run_id: int, cfg: Config, log: RunLog,
                     log.decision(msg_key=item.msg_key, seq=item.seq,
                                  state="skipped", reason="vanished")
                     skipped += 1
+                    progress.tick()
                 elif actual != item.msg_key:
                     index.mark_skipped(run_id, item.seq, "identity_mismatch")
                     log.decision(msg_key=item.msg_key, seq=item.seq,
                                  state="skipped", reason="identity_mismatch",
                                  found=actual)
                     skipped += 1
+                    progress.tick()
                 else:
                     confirmed.append(item)
             if not confirmed:
@@ -113,6 +120,7 @@ def execute(mailbox, index: Index, run_id: int, cfg: Config, log: RunLog,
                     log.decision(msg_key=item.msg_key, seq=item.seq, state="done",
                                  src=src, dst=dst, reason=item.reason)
                 moved += len(confirmed)
+                progress.tick(len(confirmed))
             elif uidvalidity_lost:
                 # Every stored UID for this folder now names a different
                 # message, so there is nothing left to salvage here: not this
@@ -151,6 +159,7 @@ def execute(mailbox, index: Index, run_id: int, cfg: Config, log: RunLog,
             if cfg.execution.pause_between_batches_ms:
                 time.sleep(cfg.execution.pause_between_batches_ms / 1000.0)
 
+    progress.done()
     return ExecutionResult(moved=moved, failed=failed, skipped=skipped)
 
 

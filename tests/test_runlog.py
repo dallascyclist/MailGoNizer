@@ -1,6 +1,6 @@
 import json
 
-from mailgonizer.runlog import RunLog
+from mailgonizer.runlog import Progress, RunLog, _rss_bytes
 
 
 def test_two_streams_are_written(tmp_path):
@@ -118,3 +118,75 @@ def test_jsonl_open_failure_closes_narrative_handle(tmp_path):
     assert len(recorded_handles) == 1, "Should have opened narrative once"
     assert recorded_handles[0].closed is True, \
         "Narrative handle must be closed before exception propagates"
+
+
+# --- progress telemetry -------------------------------------------------
+
+def test_progress_is_time_gated_not_per_item(tmp_path):
+    """A 300k-message survey must not emit 300k lines."""
+    clock = [0.0]
+    with RunLog.open(tmp_path, "s", "info") as log:
+        p = Progress(log, "SURVEY inbox", total=1000, interval=5.0,
+                     clock=lambda: clock[0])
+        for _ in range(1000):
+            clock[0] += 0.1          # 100 seconds total
+            p.tick()
+        p.done()
+    body = (tmp_path / "s.log").read_text().splitlines()
+    lines = [line for line in body if "SURVEY inbox" in line]
+    # 100s elapsed at a 5s gate -> roughly 20 updates, plus a final line.
+    assert 15 <= len(lines) <= 25, f"expected ~21 lines, got {len(lines)}"
+
+
+def test_progress_reports_count_percent_rate_and_eta(tmp_path):
+    clock = [0.0]
+    with RunLog.open(tmp_path, "s", "info") as log:
+        p = Progress(log, "SURVEY", total=100, interval=1.0, clock=lambda: clock[0])
+        for i in range(50):
+            clock[0] = (i + 1) * 0.25   # absolute, so no float drift
+            p.tick()
+        p.done()                        # what real callers do
+    body = (tmp_path / "s.log").read_text()
+    assert "50/100" in body
+    assert "50%" in body
+    assert "/s" in body
+    assert "eta" in body.lower()
+
+
+def test_progress_omits_eta_when_total_is_unknown(tmp_path):
+    clock = [0.0]
+    with RunLog.open(tmp_path, "s", "info") as log:
+        p = Progress(log, "SCAN", total=None, interval=1.0, clock=lambda: clock[0])
+        for _ in range(10):
+            clock[0] += 0.5
+            p.tick()
+    body = (tmp_path / "s.log").read_text()
+    assert "SCAN" in body
+    assert "eta" not in body.lower()
+
+
+def test_progress_final_line_always_emitted_even_if_gate_not_reached(tmp_path):
+    clock = [0.0]
+    with RunLog.open(tmp_path, "s", "info") as log:
+        p = Progress(log, "TINY", total=3, interval=60.0, clock=lambda: clock[0])
+        for _ in range(3):
+            clock[0] += 0.01
+            p.tick()
+        p.done()
+    body = (tmp_path / "s.log").read_text()
+    assert "TINY" in body and "3/3" in body
+
+
+def test_progress_reports_memory(tmp_path):
+    with RunLog.open(tmp_path, "s", "info") as log:
+        p = Progress(log, "MEM", total=1, interval=0.0)
+        p.tick()
+        p.done()
+    body = (tmp_path / "s.log").read_text()
+    assert "rss" in body.lower()
+
+
+def test_rss_bytes_is_plausible():
+    n = _rss_bytes()
+    # Any live Python process is between 1 MB and 100 GB.
+    assert 1_000_000 < n < 100_000_000_000, n

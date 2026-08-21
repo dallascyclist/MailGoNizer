@@ -81,6 +81,9 @@ class StubMailbox:
         self._selected = folder
         return 100, 500
 
+    def message_count(self, folder):
+        return sum(1 for _ in self.fetch_headers(folder))
+
     def fetch_headers(self, folder):
         yield from self.headers.get(folder, [])
 

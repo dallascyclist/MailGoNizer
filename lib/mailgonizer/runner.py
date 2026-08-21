@@ -15,7 +15,7 @@ from mailgonizer.index import Index
 from mailgonizer.planner import PlanResult, build_plan
 from mailgonizer.psl import PublicSuffixList
 from mailgonizer.records import ClassifiedMessage, HeaderRecord, compute_msg_key
-from mailgonizer.runlog import RunLog
+from mailgonizer.runlog import Progress, RunLog
 from mailgonizer.sender import derive_sender
 
 
@@ -33,9 +33,12 @@ def config_hash(cfg: Config) -> str:
 
 
 def classify(records: list[HeaderRecord], cfg: Config, psl: PublicSuffixList,
-             now: datetime) -> list[ClassifiedMessage]:
+             now: datetime, log: RunLog | None = None) -> list[ClassifiedMessage]:
     out = []
+    progress = Progress(log, "CLASSIFY", total=len(records)) if log else None
     for rec in records:
+        if progress:
+            progress.tick()
         resolved, source = resolve_date(rec.headers, rec.internaldate, cfg, now)
         message_id = rec.headers.get("message-id")
         message_id = str(message_id).strip() if message_id else None
@@ -47,21 +50,38 @@ def classify(records: list[HeaderRecord], cfg: Config, psl: PublicSuffixList,
             year=resolved.year, sender=derive_sender(rec.headers, psl),
             flags=rec.flags,
         ))
+    if progress:
+        progress.done()
     return out
 
 
 def survey(mailbox, cfg: Config, log: RunLog) -> list[HeaderRecord]:
     """Sweep INBOX and the existing archive tree. Headers only, always PEEK."""
     log.phase("SURVEY")
-    records = list(mailbox.fetch_headers(cfg.source.folder))
-    log.info(f"{cfg.source.folder}: {len(records)} messages")
 
-    for folder in mailbox.list_folders(prefix=cfg.archive.root):
-        found = list(mailbox.fetch_headers(folder))
-        records.extend(found)
-        log.debug(f"{folder}: {len(found)} messages")
+    # A twenty-year mailbox makes this phase run for hours. Report against a
+    # real denominator so an operator can tell a working run from a hung one.
+    folders = [cfg.source.folder] + list(mailbox.list_folders(prefix=cfg.archive.root))
+    totals = {f: mailbox.message_count(f) for f in folders}
+    grand_total = sum(totals.values())
+    log.info(f"{len(folders)} folders, {grand_total:,} messages to survey "
+             f"({cfg.source.folder}: {totals[cfg.source.folder]:,})")
 
-    log.info(f"surveyed {len(records)} messages total")
+    records: list[HeaderRecord] = []
+    overall = Progress(log, "SURVEY total", total=grand_total)
+    for folder in folders:
+        per_folder = Progress(log, f"SURVEY {folder}", total=totals[folder])
+        found = 0
+        for rec in mailbox.fetch_headers(folder):
+            records.append(rec)
+            found += 1
+            per_folder.tick()
+            overall.tick()
+        per_folder.done()
+        log.info(f"{folder}: {found:,} messages")
+
+    overall.done()
+    log.info(f"surveyed {len(records):,} messages total")
     return records
 
 
@@ -124,7 +144,7 @@ def do_plan(mailbox, index: Index, cfg: Config, psl: PublicSuffixList,
     records = survey(mailbox, cfg, log)
 
     log.phase("CLASSIFY")
-    messages = classify(records, cfg, psl, now)
+    messages = classify(records, cfg, psl, now, log)
     index.upsert_messages(messages, run_id)
 
     log.phase("PLAN")
