@@ -63,6 +63,22 @@ def test_case_and_trailing_dot_are_normalised(psl):
     assert psl.registrable_domain("MAIL.Amazon.COM.") == "amazon.com"
 
 
+def test_a_rule_with_a_trailing_comment_is_still_that_rule():
+    """The PSL format permits "rule<whitespace>// trailing comment". Storing
+    the whole line makes the rule unmatchable, so `co.uk` stops being a public
+    suffix and every .co.uk sender across twenty years collapses into a single
+    `co_uk` folder -- with no error and no changed exit code, and permanently,
+    because promotion is a one-way ratchet."""
+    listed = PublicSuffixList(["com", "co.uk  // trailing note", "uk"])
+
+    assert listed.registrable_domain("a.co.uk") == "a.co.uk"
+    assert listed.registrable_domain("co.uk") is None
+    assert listed.public_suffix("a.co.uk") == "co.uk"
+    # A commented exception rule survives the same treatment.
+    excepted = PublicSuffixList(["*.ck", "!www.ck  // the famous exception"])
+    assert excepted.registrable_domain("www.ck") == "www.ck"
+
+
 def test_bundled_list_loads_and_reports_a_version():
     bundled = PublicSuffixList.bundled()
     assert bundled.registrable_domain("mail.amazon.com") == "amazon.com"

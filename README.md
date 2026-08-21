@@ -113,9 +113,12 @@ db/mailgonizer.sqlite     # index: rebuildable cache, permanent move record, wor
 `log/` is pruned/retained per `logging.retention_runs` (default 24) — but
 the very first log pair ever written is exempt from pruning on purpose:
 it's the permanent record of how the archive was originally built.
-`db/mailgonizer.sqlite` is never pruned and grows without bound by design:
-`moves`, `promotions`, and `runs` are the permanent, append-only record
-that makes `undo` possible and the promotion ratchet durable.
+`db/mailgonizer.sqlite` is never pruned and grows without bound by design.
+`moves` and `promotions` are strictly append-only — never `UPDATE`d, never
+`DELETE`d — which is what makes `undo` possible and the promotion ratchet
+durable. `runs` is permanent too, but not append-only: a run row is opened
+by `start_run` and completed in place when the run ends, and a finished row
+is never rewritten afterward.
 
 ## Debugging a decision
 

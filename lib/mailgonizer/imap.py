@@ -212,29 +212,58 @@ class Mailbox:
             )
         return out
 
-    def list_uids(self, folder: str) -> list[int]:
-        self.select(folder, readonly=True)
+    def list_uids(self, folder: str, readonly: bool = True) -> list[int]:
+        """UIDs in *folder*, which is left selected on return.
+
+        `readonly` declares what the caller intends to do next, not merely how
+        it wants to search. RFC 3501 permits no changes to permanent mailbox
+        state under EXAMINE, so a caller that goes on to move mail *out* of
+        this folder must select it read-write here. Dovecot tolerates the
+        violation; CommuniGate Pro need not.
+        """
+        self.select(folder, readonly=readonly)
         return [int(u) for u in self.client.search(["ALL"])]
 
     # --- writes -----------------------------------------------------------
 
     def move(self, uids: list[int], dst: str) -> None:
+        # The refusal is structural, not merely a thing every caller remembers
+        # to do first. This is the command that actually relocates mail, so it
+        # answers for its own safety; capabilities() is memoized, so this costs
+        # a dict lookup per batch and no round trip. The existing call sites
+        # stay -- they fail fast, before surveying 300,000 headers, and give
+        # the operator a better message than a failure mid-run would. This is
+        # the backstop that catches the fifth call site someone adds in 2027.
+        self.assert_safe()
         caps = self.capabilities()
         try:
             if caps.has_move:
                 self.client.move(uids, dst)
                 return
+            # assert_safe() only rules out "neither MOVE nor UIDPLUS", which
+            # makes this branch's real precondition true two functions away.
+            # State it where it applies: with no MOVE, UID EXPUNGE is the one
+            # thing standing between this fallback and a bare EXPUNGE that
+            # would destroy unrelated \Deleted mail.
+            if not caps.has_uidplus:
+                raise UnsafeServerError(
+                    f"{self.cfg.server.host} advertises neither MOVE nor "
+                    "UIDPLUS, so this COPY fallback cannot expunge by UID. "
+                    "Refusing to move mail."
+                )
             self.client.copy(uids, dst)
             self.client.add_flags(uids, ["\\Deleted"])
-            # UID EXPUNGE, never a bare EXPUNGE.
-            self.client.expunge(messages=uids)
+            try:
+                # UID EXPUNGE, never a bare EXPUNGE.
+                self.client.expunge(messages=uids)
+            except IMAPClientError:
+                # Leaving \Deleted set loses no mail, but it is untidy in a way
+                # neither the operator nor this tool would ever detect: the
+                # planner skips these messages forever as "deleted", the user's
+                # client shows them awaiting compaction, and a retry COPYs them
+                # to the destination a second time. Roll the flag back so the
+                # retry starts from the state it expects.
+                self.client.remove_flags(uids, ["\\Deleted"])
+                raise
         except IMAPClientError as exc:
             raise TransientError(f"move of {len(uids)} uids to {dst!r}: {exc}") from exc
-
-    def close(self) -> None:
-        try:
-            self.client.logout()
-        except (IMAPClientError, OSError) as exc:
-            # Losing the connection on the way out changes nothing that matters,
-            # but it is still worth surfacing rather than discarding.
-            raise TransientError(f"logout failed: {exc}") from exc

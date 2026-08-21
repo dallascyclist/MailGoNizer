@@ -5,22 +5,26 @@ Live protocol behavior (real IMAPClient wire traffic) is covered by Task 12.
 
 import pytest
 
+from imapclient.exceptions import IMAPClientError
+
 from mailgonizer.config import Config, ExecutionConfig, ServerConfig
-from mailgonizer.imap import Mailbox, UnsafeServerError
+from mailgonizer.imap import Mailbox, TransientError, UnsafeServerError
 
 
 class FakeClient:
     def __init__(self, capabilities=(b"IMAP4REV1", b"MOVE", b"UIDPLUS"),
-                 folders=(), delimiter=b"/"):
+                 folders=(), delimiter=b"/", expunge_fails=False):
         self._caps = capabilities
         self._folders = list(folders)
         self._delimiter = delimiter
+        self.expunge_fails = expunge_fails
         self.created = []
         self.subscribed = []
         self.moved = []
         self.copied = []
         self.expunged = []
         self.flagged = []
+        self.unflagged = []
 
     def capabilities(self):
         return self._caps
@@ -49,7 +53,12 @@ class FakeClient:
     def add_flags(self, uids, flags):
         self.flagged.append((tuple(uids), tuple(flags)))
 
+    def remove_flags(self, uids, flags):
+        self.unflagged.append((tuple(uids), tuple(flags)))
+
     def expunge(self, messages=None):
+        if self.expunge_fails:
+            raise IMAPClientError("NO [SERVERBUG] expunge failed")
         self.expunged.append(tuple(messages) if messages else None)
 
     def logout(self):
@@ -92,6 +101,58 @@ def test_uidplus_alone_is_acceptable():
 def test_move_alone_is_acceptable():
     client = FakeClient(capabilities=(b"IMAP4REV1", b"MOVE"), folders=["INBOX"])
     Mailbox(client, cfg()).assert_safe()
+
+
+def test_move_refuses_an_unsafe_server_on_its_own_account():
+    """Every call site calls assert_safe() first today, and they stay -- they
+    fail fast, before surveying 300,000 headers. But move() is the command
+    that actually relocates mail, so it refuses without being asked. This is
+    the backstop for the fifth call site someone adds in 2027."""
+    client = FakeClient(capabilities=(b"IMAP4REV1",), folders=["INBOX"])
+    mb = Mailbox(client, cfg())
+
+    # The COPY-fallback branch below refuses this same server, so matching on
+    # assert_safe()'s own wording ("Refusing to run", against the fallback's
+    # "Refusing to move mail") is what proves the entry guard is the one that
+    # fired -- and what makes deleting it a visible regression.
+    with pytest.raises(UnsafeServerError, match="Refusing to run"):
+        mb.move([1, 2], "dst")
+
+    assert client.moved == [] and client.copied == []
+
+
+def test_the_copy_fallback_states_its_own_uidplus_precondition(monkeypatch):
+    """assert_safe() only rules out "neither MOVE nor UIDPLUS", which leaves
+    this branch's real precondition -- UID EXPUNGE exists -- true only two
+    functions away. Stated where it applies, it still holds if assert_safe()
+    is ever loosened."""
+    client = FakeClient(capabilities=(b"IMAP4REV1",), folders=["INBOX"])
+    mb = Mailbox(client, cfg())
+    # Stand in for a future assert_safe() that no longer covers this case.
+    monkeypatch.setattr(mb, "assert_safe", lambda: None)
+
+    with pytest.raises(UnsafeServerError, match="UIDPLUS"):
+        mb.move([1, 2], "dst")
+
+    # Refused before COPY, so no half-done move to clean up.
+    assert client.copied == [] and client.flagged == [] and client.expunged == []
+
+
+def test_a_failed_expunge_rolls_back_the_deleted_flag_it_set():
+    """Left set, \\Deleted loses no mail but is untidy in a way neither the
+    operator nor this tool would detect: the planner skips these messages
+    forever as "deleted", the user's client shows them awaiting compaction,
+    and the retry COPYs them to the destination a second time."""
+    client = FakeClient(capabilities=(b"IMAP4REV1", b"UIDPLUS"),
+                        folders=["INBOX"], expunge_fails=True)
+    mb = Mailbox(client, cfg())
+
+    with pytest.raises(TransientError):
+        mb.move([1, 2], "dst")
+
+    assert client.copied == [((1, 2), "dst")]
+    assert client.flagged == [((1, 2), ("\\Deleted",))]
+    assert client.unflagged == [((1, 2), ("\\Deleted",))]
 
 
 def test_ensure_folder_creates_parents_first():

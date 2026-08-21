@@ -80,9 +80,21 @@ def test_the_last_received_header_is_used_because_it_is_the_origin(cfg):
 
 
 def test_received_without_a_semicolon_is_skipped(cfg):
+    """RFC 5322 puts the hop timestamp after a ';'. Text in any other position
+    is not a timestamp, however much it may look like one, so it must not be
+    used to date the message -- that would silently file it under the wrong
+    year, which is the whole archive layout.
+
+    Two things make this test non-vacuous. Received: headers are prepended in
+    transit, so resolve_date walks them in reverse: the malformed one has to be
+    written LAST to be the one the loop actually reaches first. And its value
+    has to be something that *would* parse if the ';' check were dropped --
+    otherwise the later "did it parse?" check skips it anyway and the ';'
+    check is never what decides the outcome.
+    """
     msg = parse(
-        "Received: malformed no timestamp here\n"
-        "Received: from origin by relay1; Mon, 2 Mar 2009 12:00:00 +0000\n\n"
+        "Received: from origin by relay1; Mon, 2 Mar 2009 12:00:00 +0000\n"
+        "Received: Wed, 4 Mar 2009 12:00:00 +0000\n\n"
     )
     dt, src = resolve_date(msg, INTERNAL, cfg)
     assert src == "received" and dt.day == 2

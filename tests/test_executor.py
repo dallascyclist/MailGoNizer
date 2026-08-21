@@ -11,11 +11,14 @@ from mailgonizer.runlog import RunLog
 
 
 class FakeMailbox:
-    def __init__(self, uidvalidity=100, identities=None, fail_moves=0, uidvalidities=None):
+    def __init__(self, uidvalidity=100, identities=None, fail_moves=0,
+                 uidvalidities=None, poison=()):
         self.uidvalidity = uidvalidity
         self.uidvalidities = uidvalidities or {}
         self.identities = identities or {}
         self.fail_moves = fail_moves
+        # UIDs the server permanently refuses, however they are asked for.
+        self.poison = set(poison)
         self.moves = []
         self.ensured = []
         self.selected = []
@@ -37,6 +40,9 @@ class FakeMailbox:
         if self.fail_moves > 0:
             self.fail_moves -= 1
             raise TransientError("connection reset")
+        bad = sorted(self.poison.intersection(uids))
+        if bad:
+            raise TransientError(f"NO [CANNOT] uid {bad[0]} is unreadable")
         self.moves.append((tuple(uids), dst))
 
 
@@ -230,6 +236,64 @@ def test_reconnect_is_propagated_to_later_batches(setup, monkeypatch):
     # fetch_identity/move calls would silently go to the original instead.
     assert original.moves == []
     assert replacement.moves == [((10,), "dst"), ((11,), "dst")]
+
+
+def test_reconnect_onto_a_new_uidvalidity_abandons_the_move(setup, monkeypatch):
+    """The FETCH that proved these UIDs are the planned messages happened on
+    the connection that just died. If the transient failure was a restart that
+    bumped UIDVALIDITY, the same integers now address entirely different
+    messages -- moving them is the one path by which this tool could relocate
+    mail nobody asked it to touch. Re-SELECTing is not enough; the reconnect
+    must re-verify that the folder is still the folder the plan was built on."""
+    index, log, run_id = setup
+    plan(index, run_id, [
+        PlanItem(1, "k1", "INBOX", 10, 100, "dst", "archive"),
+        PlanItem(2, "k2", "INBOX", 11, 100, "dst", "archive"),
+    ])
+    monkeypatch.setattr(time, "sleep", lambda seconds: None)
+
+    original = FakeMailbox(identities={10: "k1", 11: "k2"}, fail_moves=99)
+    # The replacement would happily move these UIDs -- and they still carry
+    # the planned msg_keys -- but the folder they live in is a new one.
+    replacement = FakeMailbox(uidvalidity=999, identities={10: "k1", 11: "k2"})
+
+    result = execute(
+        original, index, run_id,
+        cfg(execution={"batch_size": 1, "connect_retries": 3}),
+        log, reconnect=lambda: replacement,
+    )
+
+    assert result.moved == 0 and result.failed == 2
+    assert original.moves == [] and replacement.moves == []
+    rows = {r["seq"]: r for r in index.all_items(run_id)}
+    assert rows[1]["state"] == "failed" and rows[2]["state"] == "failed"
+    # The second item is behind the abandoned batch and must not be attempted
+    # against the stale UIDs either.
+    assert "UIDVALIDITY" in rows[1]["error"]
+    assert "UIDVALIDITY" in rows[2]["error"]
+
+
+def test_one_bad_message_does_not_fail_its_whole_batch(setup, monkeypatch):
+    """Batch-granular failure marks all 200 `failed`, so they stop being
+    `pending` and a resumed `apply` never retries them -- only next month's
+    fresh plan does, where the same poison message fails the same 199
+    neighbours again, forever. The blast radius must be one message."""
+    index, log, run_id = setup
+    plan(index, run_id, [
+        PlanItem(1, "k1", "INBOX", 10, 100, "dst", "archive"),
+        PlanItem(2, "k2", "INBOX", 11, 100, "dst", "archive"),
+        PlanItem(3, "k3", "INBOX", 12, 100, "dst", "archive"),
+    ])
+    monkeypatch.setattr(time, "sleep", lambda seconds: None)
+    mb = FakeMailbox(identities={10: "k1", 11: "k2", 12: "k3"}, poison={11})
+
+    result = execute(mb, index, run_id, cfg(execution={"connect_retries": 2}), log)
+
+    assert result.moved == 2 and result.failed == 1
+    assert mb.moves == [((10,), "dst"), ((12,), "dst")]
+    states = {r["seq"]: r["state"] for r in index.all_items(run_id)}
+    assert states == {1: "done", 2: "failed", 3: "done"}
+    assert "uid 11" in index.all_items(run_id)[1]["error"]
 
 
 def test_resumption_only_touches_pending_items(setup):

@@ -25,6 +25,12 @@ class PublicSuffixList:
             stripped = line.strip()
             if not stripped or stripped.startswith("//"):
                 continue
+            # The format allows "rule<whitespace>// trailing comment", and the
+            # rule is only the first token. Keeping the whole line would store
+            # a rule that can never match, so the true suffix goes unrecognised
+            # and every sender under it collapses into one folder -- silently,
+            # and permanently, because promotion is a one-way ratchet.
+            stripped = stripped.split()[0]
             count += 1
             if stripped.startswith("!"):
                 self.exceptions.add(stripped[1:].lower())

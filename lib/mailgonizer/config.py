@@ -190,6 +190,18 @@ def load_config(path: Path) -> Config:
         raise ConfigError("archive.promote_threshold must be at least 1")
     if sections["execution"].batch_size < 1:
         raise ConfigError("execution.batch_size must be at least 1")
+    if naming.max_component_length < 16:
+        # An over-long component is truncated and given a disambiguating
+        # suffix of "_" plus 8 hex digits. Below 10 the arithmetic for that
+        # suffix goes negative and silently truncates from the wrong end;
+        # 16 leaves at least 7 characters of the actual name, which is the
+        # least that still tells the operator whose folder they are looking at.
+        raise ConfigError(
+            f"naming.max_component_length must be at least 16, got "
+            f"{naming.max_component_length}. Truncated components carry a "
+            "9-character '_' + 8-hex-digit suffix to keep distinct senders "
+            "apart, and a smaller limit cannot fit it."
+        )
 
     unknown_top = set(raw) - {"server", *_SECTIONS}
     if unknown_top:

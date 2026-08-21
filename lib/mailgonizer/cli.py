@@ -12,7 +12,7 @@ from pathlib import Path
 
 from mailgonizer import recovery, runner
 from mailgonizer.config import Config, ConfigError, load_config
-from mailgonizer.imap import FatalError, Mailbox
+from mailgonizer.imap import FatalError, Mailbox, TransientError
 from mailgonizer.index import Index
 from mailgonizer.psl import PublicSuffixList
 from mailgonizer.runlog import RunLog
@@ -20,6 +20,16 @@ from mailgonizer.runlog import RunLog
 EXIT_OK = 0
 EXIT_FATAL = 1
 EXIT_WITH_FAILURES = 2
+
+
+def _transient(exc: Exception) -> str:
+    """Report a TransientError as the retryable thing it is.
+
+    Mailbox.connect raises TransientError on OSError, so before this was
+    caught a brief network blip at cron time produced a raw traceback rather
+    than the classified, retryable failure spec 9.3 describes.
+    """
+    return f"transient failure, nothing was changed — safe to retry: {exc}"
 
 
 def resolve_root(explicit: str | None = None) -> Path:
@@ -151,6 +161,9 @@ def main(argv: list[str] | None = None, mailbox_factory=None) -> int:
             except FatalError as exc:
                 log.error(str(exc))
                 return EXIT_FATAL
+            except TransientError as exc:
+                log.error(_transient(exc))
+                return EXIT_FATAL
 
     with Index.open(db_path) as index, \
             RunLog.open(log_dir, RunLog.stamp_now(), level) as log:
@@ -216,7 +229,7 @@ def main(argv: list[str] | None = None, mailbox_factory=None) -> int:
                 return EXIT_OK if outcome.failed == 0 else EXIT_WITH_FAILURES
 
             if args.command == "undo":
-                recovery.undo_run(mailbox, index, cfg, log, args.run)
+                recovery.undo_run(mailbox, index, cfg, psl, log, args.run)
                 RunLog.prune(log_dir, cfg.logging.retention_runs)
                 return EXIT_OK
 
@@ -228,6 +241,11 @@ def main(argv: list[str] | None = None, mailbox_factory=None) -> int:
         except FatalError as exc:
             log.error(str(exc))
             print(f"mailgonizer: {exc}", file=sys.stderr)
+            return EXIT_FATAL
+        except TransientError as exc:
+            message = _transient(exc)
+            log.error(message)
+            print(f"mailgonizer: {message}", file=sys.stderr)
             return EXIT_FATAL
 
     return EXIT_FATAL

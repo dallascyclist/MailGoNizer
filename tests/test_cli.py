@@ -233,6 +233,29 @@ def test_apply_with_no_prior_run_is_a_fatal_error(root, capsys):
     assert "no runs" in capsys.readouterr().err.lower()
 
 
+def test_a_transient_failure_exits_cleanly_rather_than_raising(root, capsys):
+    """Mailbox.connect raises TransientError on OSError, but main() caught
+    only FatalError -- TransientError is not a subclass -- so a brief network
+    blip at cron time produced a raw traceback instead of the classified,
+    retryable failure spec 9.3 describes."""
+    def unreachable(cfg):
+        raise TransientError("cannot reach mail.example.com: timed out")
+
+    code = main(["--root", str(root), "plan"], mailbox_factory=unreachable)
+
+    assert code == 1
+    err = capsys.readouterr().err.lower()
+    assert "traceback" not in err
+    assert "timed out" in err and "retry" in err
+
+
+def test_check_exits_cleanly_on_a_transient_failure(root):
+    def unreachable(cfg):
+        raise TransientError("cannot reach mail.example.com: timed out")
+
+    assert main(["--root", str(root), "check"], mailbox_factory=unreachable) == 1
+
+
 def test_show_plan_with_no_prior_run_is_a_fatal_error(root, capsys):
     assert run_cli(root, ["show-plan"], StubMailbox()) == 1
     assert "no runs" in capsys.readouterr().err.lower()

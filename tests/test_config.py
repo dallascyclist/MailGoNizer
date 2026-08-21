@@ -37,6 +37,37 @@ def test_defaults_match_the_spec(tmp_path, monkeypatch):
     assert cfg.logging.retention_runs == 24
 
 
+@pytest.mark.parametrize("length", [1, 8, 9, 15])
+def test_a_max_component_length_too_small_for_the_suffix_is_rejected(
+        tmp_path, monkeypatch, length):
+    """Truncation appends "_" + 8 hex digits to keep distinct senders apart,
+    slicing to max_len - 9 to make room. Below 9 that bound goes negative, so
+    the slice trims from the wrong end and the "shortened" component comes out
+    longer than the limit that produced it (max_component_length 8 turns a
+    30-character sender into a 38-character folder name). From 9 to 15 the
+    length is right but the name is all hash and no sender, so 16 is the floor
+    that leaves enough of the name to be worth reading."""
+    monkeypatch.setenv("MAILGONIZER_PASSWORD", "hunter2")
+    text = MINIMAL + f"\nnaming:\n  max_component_length: {length}\n"
+    with pytest.raises(ConfigError, match="max_component_length"):
+        load_config(write(tmp_path, text))
+
+
+def test_the_smallest_accepted_max_component_length_actually_fits(
+        tmp_path, monkeypatch):
+    """16 is the floor, so it must genuinely hold: a truncated component has
+    to come out no longer than the limit itself."""
+    from mailgonizer.sender import escape_component
+
+    monkeypatch.setenv("MAILGONIZER_PASSWORD", "hunter2")
+    cfg = load_config(write(
+        tmp_path, MINIMAL + "\nnaming:\n  max_component_length: 16\n"))
+
+    assert cfg.naming.max_component_length == 16
+    out = escape_component("a-very-long-sender-name-indeed", "_", 16)
+    assert len(out) <= 16
+
+
 def test_missing_required_field_is_rejected(tmp_path):
     with pytest.raises(ConfigError, match="server.host"):
         load_config(write(tmp_path, "server:\n  username: a@b.com\n"))

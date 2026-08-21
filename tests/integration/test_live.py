@@ -216,7 +216,7 @@ def test_undo_returns_everything_to_the_inbox(mailbox, slash_cfg, psl, tmp_path)
         run_id, _result = do_plan(mailbox, index, slash_cfg, psl, log,
                                   datetime.now(timezone.utc))
         do_apply(mailbox, index, slash_cfg, log, run_id)
-        undo_run(mailbox, index, slash_cfg, log, run_id)
+        undo_run(mailbox, index, slash_cfg, psl, log, run_id)
 
     mailbox.select("INBOX", readonly=True)
     assert len(mailbox.client.search(["ALL"])) == 5
