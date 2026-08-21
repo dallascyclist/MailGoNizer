@@ -12,6 +12,7 @@ from imapclient.exceptions import IMAPClientError
 from mailgonizer.config import Config, ExecutionConfig, ServerConfig
 from mailgonizer.imap import (
     _RESPONSE_HEADERS,
+    FatalError,
     Mailbox,
     TransientError,
     UnsafeServerError,
@@ -278,3 +279,83 @@ def test_list_uids_survives_a_mailbox_too_large_for_one_search():
     assert len(uids) == 200_000
     assert all(c != ["ALL"] for c in client.search_criteria), \
         "list_uids issued an unbounded SEARCH ALL"
+
+
+# --- server-specific response-key spelling ------------------------------
+#
+# We request BODY.PEEK[HEADER.FIELDS (...)]; the server answers with a key
+# that is supposed to be the same minus PEEK. Dovecot echoes it verbatim.
+# CommuniGate Pro quotes every field name. An exact-string lookup misses the
+# second form, and defaulting to b"" turned that miss into a 349,000-message
+# survey that completed with every header field empty and every message filed
+# under _unknown.
+
+_DOVECOT_KEY = b'BODY[HEADER.FIELDS (DATE FROM SENDER RETURN-PATH LIST-ID MESSAGE-ID RECEIVED)]'
+_COMMUNIGATE_KEY = (b'BODY[HEADER.FIELDS ("DATE" "FROM" "SENDER" "RETURN-PATH" '
+                    b'"LIST-ID" "MESSAGE-ID" "RECEIVED")]')
+
+_REAL_HEADERS = (b"Date: Fri, 8 Dec 2017 22:39:00 +0000\r\n"
+                 b"From: Orders <orders@amazon.com>\r\n"
+                 b"Message-ID: <abc123@amazon.com>\r\n\r\n")
+
+
+class KeySpellingClient(FakeClient):
+    """A server that spells the fetch response key its own way."""
+
+    def __init__(self, response_key, include_body=True, **kw):
+        super().__init__(**kw)
+        self.response_key = response_key
+        self.include_body = include_body
+
+    def select_folder(self, folder, readonly=True):
+        return {b"UIDVALIDITY": 100, b"UIDNEXT": 2, b"EXISTS": 1}
+
+    def search(self, criteria):
+        return [1]
+
+    def fetch(self, uids, specs):
+        from datetime import datetime, timezone
+        data = {b"INTERNALDATE": datetime(2017, 12, 8, 22, 39, tzinfo=timezone.utc),
+                b"RFC822.SIZE": 69678, b"FLAGS": (b"\\Seen",), b"SEQ": 1}
+        if self.include_body:
+            data[self.response_key] = _REAL_HEADERS
+        return {u: dict(data) for u in uids}
+
+
+@pytest.mark.parametrize("key,label", [
+    (_DOVECOT_KEY, "dovecot"),
+    (_COMMUNIGATE_KEY, "communigate-pro"),
+])
+def test_headers_are_found_whatever_the_server_calls_the_key(key, label):
+    mb = Mailbox(KeySpellingClient(key, folders=["INBOX"]), cfg())
+    [rec] = list(mb.fetch_headers("INBOX"))
+    assert rec.headers.get("from") == "Orders <orders@amazon.com>", label
+    assert rec.headers.get("message-id") == "<abc123@amazon.com>", label
+    assert rec.headers.get("date") is not None, label
+
+
+def test_missing_header_payload_fails_loudly_rather_than_yielding_nothing():
+    """A survey that cannot find its headers must abort, not file 349k
+    messages under _unknown while reporting success."""
+    client = KeySpellingClient(_DOVECOT_KEY, include_body=False, folders=["INBOX"])
+    mb = Mailbox(client, cfg())
+    with pytest.raises(FatalError, match="header"):
+        list(mb.fetch_headers("INBOX"))
+
+
+def test_fetch_identity_also_tolerates_a_quoted_key():
+    quoted = b'BODY[HEADER.FIELDS ("MESSAGE-ID")]'
+    client = KeySpellingClient(quoted, folders=["INBOX"])
+    mb = Mailbox(client, cfg())
+    ident = mb.fetch_identity([1])
+
+    # A 64-char digest proves nothing: compute_msg_key returns one even when
+    # message_id is None. Assert the key matches one computed WITH the real
+    # Message-ID, which is only possible if the payload was actually found.
+    from datetime import datetime, timezone
+
+    from mailgonizer.records import compute_msg_key
+    expected = compute_msg_key("<abc123@amazon.com>",
+                               datetime(2017, 12, 8, 22, 39, tzinfo=timezone.utc),
+                               69678)
+    assert ident == {1: expected}

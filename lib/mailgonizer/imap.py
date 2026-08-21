@@ -89,6 +89,43 @@ def _require_aware(source: str, uid: int, internaldate) -> None:
         )
 
 
+def _body_payload(data: dict, uid: int, source: str) -> bytes:
+    """The header payload from a FETCH response, however the server spelled it.
+
+    We ask for BODY.PEEK[HEADER.FIELDS (...)]; the server answers with a key
+    that is supposed to be the same minus PEEK. Servers do not agree on how to
+    write it:
+
+        requested    BODY.PEEK[HEADER.FIELDS (DATE FROM SENDER ...)]
+        Dovecot      BODY[HEADER.FIELDS (DATE FROM SENDER ...)]        # response-key
+        CommuniGate  BODY[HEADER.FIELDS ("DATE" "FROM" "SENDER" ...)]  # response-key
+
+    Looking the payload up by an exact string therefore works on one server and
+    silently misses on another. Matching on shape costs nothing and survives
+    quoting, spacing, ordering and case.
+
+    Absence is fatal rather than empty. A `.get(key, b"")` default here once let
+    a 349,000-message survey run to completion with every header field blank,
+    every sender resolved to `_unknown`, and every date fallen back to
+    INTERNALDATE — reporting success the whole way. If the headers are not in
+    the response, nothing downstream can be trusted, so stop.
+    """
+    for key, value in data.items():
+        if not isinstance(key, (bytes, bytearray)):
+            continue
+        upper = bytes(key).upper()
+        if upper.startswith(b"BODY[") and b"HEADER" in upper:  # response-key
+            return value
+    raise FatalError(
+        f"{source}: no header payload in the FETCH response for uid {uid}. "
+        f"Requested {_FETCH_HEADERS!r}; the server returned keys "
+        f"{sorted(bytes(k) for k in data if isinstance(k, (bytes, bytearray)))!r}. "
+        "Without headers every message would resolve to an unknown sender and "
+        "fall back to INTERNALDATE, so the survey is aborted rather than "
+        "producing an archive built on nothing."
+    )
+
+
 class Mailbox:
     def __init__(self, client, cfg: Config) -> None:
         self.client = client
@@ -224,7 +261,7 @@ class Mailbox:
             chunk = uids[start:start + chunk_size]
             response = self.client.fetch(chunk, [*_FETCH_META, _FETCH_HEADERS])
             for uid, data in response.items():
-                raw = data.get(_RESPONSE_HEADERS, b"")
+                raw = _body_payload(data, int(uid), "fetch_headers")
                 headers = email.message_from_bytes(raw, policy=default_policy)
                 internaldate = data[b"INTERNALDATE"]
                 _require_aware("fetch_headers", int(uid), internaldate)
@@ -242,7 +279,7 @@ class Mailbox:
         )
         out = {}
         for uid, data in response.items():
-            raw = data.get(_RESPONSE_IDENTITY, b"")
+            raw = _body_payload(data, int(uid), "fetch_identity")
             headers = email.message_from_bytes(raw, policy=default_policy)
             message_id = headers.get("message-id")
             internaldate = data[b"INTERNALDATE"]
