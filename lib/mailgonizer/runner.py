@@ -67,10 +67,11 @@ def survey(mailbox, cfg: Config, log: RunLog) -> list[HeaderRecord]:
 
 def do_check(mailbox, cfg: Config, log: RunLog,
              last_psl_version: str | None = None) -> int:
-    """Validate the environment. Performs no writes of any kind.
+    """Validate the environment. Touches neither the mailbox nor the
+    database (it does write its own run log).
 
     `last_psl_version` is passed in rather than read here, because opening the
-    database would create the file — and `check` promises to write nothing.
+    database would create the file, and `check` must not touch the database.
     """
     log.phase("CHECK")
 

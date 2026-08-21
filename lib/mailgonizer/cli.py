@@ -44,7 +44,8 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     sub.add_parser("init", help="seed etc/config.yaml and create log/ and db/")
-    sub.add_parser("check", help="validate config and server; writes nothing")
+    sub.add_parser("check", help="validate config and server; touches "
+                    "neither the mailbox nor the database")
     sub.add_parser("plan", help="survey, classify, and persist a plan")
     sub.add_parser("status", help="report the last run")
 

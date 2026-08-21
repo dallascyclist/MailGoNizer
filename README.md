@@ -90,7 +90,9 @@ export MAILGONIZER_PASSWORD='...'
 invocations refuse rather than race, then runs `mailgonizer run`. Exit code
 passes through: `0` on a clean run, `1` on a fatal error (nothing was
 touched, or the run aborted mid-way), `2` when the run completed but some
-individual messages failed or were skipped. Any non-zero exit is what
+individual messages failed. Skipped messages (`already_moved`, `vanished`,
+`identity_mismatch`, and similar) are normal — expected on any idempotent
+re-run — and do not affect the exit code. Any non-zero exit is what
 surfaces the run via cron's mail-on-failure behavior.
 
 ## Directory layout
@@ -108,17 +110,22 @@ log/YYYYMMDD-HHMM.jsonl   # one JSON line per message decision
 db/mailgonizer.sqlite     # index: rebuildable cache, permanent move record, working plan
 ```
 
-`log/` and `db/` are pruned/retained per `logging.retention_runs`
-(default 24) — but the very first log pair ever written is exempt from
-pruning on purpose: it's the permanent record of how the archive was
-originally built.
+`log/` is pruned/retained per `logging.retention_runs` (default 24) — but
+the very first log pair ever written is exempt from pruning on purpose:
+it's the permanent record of how the archive was originally built.
+`db/mailgonizer.sqlite` is never pruned and grows without bound by design:
+`moves`, `promotions`, and `runs` are the permanent, append-only record
+that makes `undo` possible and the promotion ratchet durable.
 
 ## Debugging a decision
 
 Every message's fate is one JSON line in that run's `.jsonl` file, keyed by
-`msg_key` (a 64-character sha256 hex digest of message-id, resolved
-internaldate, and size — durable across `MOVE`/`COPY` because none of those
-inputs change when a message relocates):
+`msg_key` (a 64-character sha256 hex digest of message-id, the raw IMAP
+`INTERNALDATE` normalized to UTC, and size — not the resolved `Date:` →
+`Received:` → `INTERNALDATE` date used for archive placement. `msg_key`
+deliberately does not depend on `Date:`-header parsing, which keeps it
+durable across `MOVE`/`COPY` because none of those inputs change when a
+message relocates):
 
 ```bash
 # find one message's key first, e.g. from `show-plan --format json`, then:
