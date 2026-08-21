@@ -3,12 +3,19 @@
 Live protocol behavior (real IMAPClient wire traffic) is covered by Task 12.
 """
 
+import imaplib
+
 import pytest
 
 from imapclient.exceptions import IMAPClientError
 
 from mailgonizer.config import Config, ExecutionConfig, ServerConfig
-from mailgonizer.imap import Mailbox, TransientError, UnsafeServerError
+from mailgonizer.imap import (
+    _RESPONSE_HEADERS,
+    Mailbox,
+    TransientError,
+    UnsafeServerError,
+)
 
 
 class FakeClient:
@@ -205,3 +212,69 @@ def test_fallback_never_issues_a_bare_expunge():
     client = FakeClient(capabilities=(b"IMAP4REV1", b"UIDPLUS"))
     Mailbox(client, cfg()).move([7], "dst")
     assert None not in client.expunged
+
+
+# --- large-mailbox SEARCH windowing -------------------------------------
+#
+# A twenty-year INBOX answers `SEARCH ALL` with every UID on ONE untagged
+# line. imaplib refuses any line over _MAXLINE (1,000,000 bytes), which at
+# ~7-8 bytes per UID is a hard ceiling around 125,000 messages. The survey
+# then dies before fetching a single header. These fakes reproduce that.
+
+class _TooManyBytes(imaplib.IMAP4.error):
+    pass
+
+
+class LargeMailboxClient(FakeClient):
+    """A mailbox big enough that an unbounded SEARCH blows imaplib's line limit."""
+
+    def __init__(self, message_count=200_000, **kw):
+        super().__init__(**kw)
+        self._uids = list(range(1, message_count + 1))
+        self.uidnext = message_count + 1
+        self.search_criteria = []
+
+    def select_folder(self, folder, readonly=True):
+        return {b"UIDVALIDITY": 100, b"UIDNEXT": self.uidnext,
+                b"EXISTS": len(self._uids)}
+
+    def search(self, criteria):
+        self.search_criteria.append(criteria)
+        if criteria == ["ALL"] or criteria == "ALL":
+            # What a real server + imaplib do: one line, over the limit.
+            raise _TooManyBytes("got more than 1000000 bytes")
+        if len(criteria) == 2 and str(criteria[0]).upper() == "UID":
+            lo, _, hi = str(criteria[1]).partition(":")
+            lo, hi = int(lo), int(hi)
+            window = [u for u in self._uids if lo <= u <= hi]
+            # Guard the property under test: no window may exceed the limit.
+            approx = sum(len(str(u)) + 1 for u in window)
+            if approx > imaplib._MAXLINE:
+                raise _TooManyBytes("got more than 1000000 bytes")
+            return window
+        raise AssertionError(f"unexpected search criteria: {criteria!r}")
+
+    def fetch(self, uids, specs):
+        from datetime import datetime, timezone
+        blob = b"From: a@example.com\r\nMessage-ID: <x@y>\r\n\r\n"
+        return {u: {b"INTERNALDATE": datetime(2019, 1, 1, tzinfo=timezone.utc),
+                    b"RFC822.SIZE": 100, b"FLAGS": (),
+                    _RESPONSE_HEADERS: blob} for u in uids}
+
+
+def test_fetch_headers_survives_a_mailbox_too_large_for_one_search():
+    client = LargeMailboxClient(message_count=200_000, folders=["INBOX"])
+    mb = Mailbox(client, cfg())
+    first = next(mb.fetch_headers("INBOX"))
+    assert first.uid == 1
+    assert all(c != ["ALL"] for c in client.search_criteria), \
+        "survey issued an unbounded SEARCH ALL"
+
+
+def test_list_uids_survives_a_mailbox_too_large_for_one_search():
+    client = LargeMailboxClient(message_count=200_000, folders=["INBOX"])
+    mb = Mailbox(client, cfg())
+    uids = mb.list_uids("INBOX")
+    assert len(uids) == 200_000
+    assert all(c != ["ALL"] for c in client.search_criteria), \
+        "list_uids issued an unbounded SEARCH ALL"

@@ -28,6 +28,15 @@ _RESPONSE_HEADERS = f"BODY[HEADER.FIELDS ({_HEADER_FIELDS})]".encode()  # respon
 
 _FETCH_META = [b"INTERNALDATE", b"FLAGS", b"RFC822.SIZE"]
 
+# A server answers SEARCH with every matching UID on a single untagged line,
+# and imaplib refuses any line longer than _MAXLINE (1 MB). At roughly eight
+# bytes per UID that caps an unbounded `SEARCH ALL` at ~125,000 messages —
+# well inside the range of a mailbox this tool exists to organise. Windowing
+# the search by UID range bounds each response without changing the set it
+# returns. 25,000 UIDs is at most ~250 KB even with nine-digit UIDs, leaving
+# roughly four times headroom.
+_SEARCH_WINDOW = 25_000
+
 _IDENTITY_FIELDS = "MESSAGE-ID"
 _FETCH_IDENTITY = f"BODY.PEEK[HEADER.FIELDS ({_IDENTITY_FIELDS})]".encode()
 _RESPONSE_IDENTITY = f"BODY[HEADER.FIELDS ({_IDENTITY_FIELDS})]".encode()  # response-key
@@ -175,9 +184,30 @@ class Mailbox:
 
     # --- reads ------------------------------------------------------------
 
+    def _search_all_uids(self, uidnext: int) -> list[int]:
+        """Every UID in the selected folder, gathered in bounded windows.
+
+        UIDNEXT is the next UID the server will assign, so live UIDs are all
+        below it. When the server does not report one we fall back to a single
+        unbounded search: that is the old behaviour and it can still exceed
+        imaplib's line limit, but it is honest. Silently searching a truncated
+        range would drop mail from the survey, and mail the survey never sees
+        is mail this tool never archives.
+        """
+        if uidnext < 2:
+            return [int(u) for u in self.client.search(["ALL"])]
+
+        uids: list[int] = []
+        lo = 1
+        while lo < uidnext:
+            hi = min(lo + _SEARCH_WINDOW - 1, uidnext - 1)
+            uids.extend(int(u) for u in self.client.search(["UID", f"{lo}:{hi}"]))
+            lo = hi + 1
+        return uids
+
     def fetch_headers(self, folder: str) -> Iterator[HeaderRecord]:
-        uidvalidity, _ = self.select(folder, readonly=True)
-        uids = self.client.search(["ALL"])
+        uidvalidity, uidnext = self.select(folder, readonly=True)
+        uids = self._search_all_uids(uidnext)
         chunk_size = self.cfg.execution.batch_size
         for start in range(0, len(uids), chunk_size):
             chunk = uids[start:start + chunk_size]
@@ -221,8 +251,8 @@ class Mailbox:
         this folder must select it read-write here. Dovecot tolerates the
         violation; CommuniGate Pro need not.
         """
-        self.select(folder, readonly=readonly)
-        return [int(u) for u in self.client.search(["ALL"])]
+        _uidvalidity, uidnext = self.select(folder, readonly=readonly)
+        return self._search_all_uids(uidnext)
 
     # --- writes -----------------------------------------------------------
 

@@ -1,0 +1,44 @@
+# MailGoNizer configuration. Copy to etc/config.yaml (mode 0600) and edit.
+
+server:
+  host: mail.dldavis.com
+  port: 993
+  ssl: true
+  username: doug@
+  # Either set password_env and export that variable, or put `password:` here
+  # in a 0600 file. password_env is preferred.
+  password_env: MAILGONIZER_PASSWORD
+  timeout_seconds: 60
+
+source:
+  folder: INBOX
+  age_days: 90
+
+archive:
+  root: Crono_Archive
+  promote_threshold: 13
+  lists_folder: lists
+  unknown_folder: _unknown
+
+naming:
+  domain_separator: "_"
+  max_component_length: 64
+
+dates:
+  timezone: America/Chicago
+  min_valid: 1990-01-01
+
+exclusions:
+  keep_flagged: true
+  never_archive: []
+
+execution:
+  batch_size: 200
+  pause_between_batches_ms: 250
+  max_moves_per_run: 0
+  subscribe_created_folders: false
+  connect_retries: 3
+
+logging:
+  level: info
+  retention_runs: 24
