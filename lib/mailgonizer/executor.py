@@ -121,6 +121,7 @@ def execute(mailbox, index: Index, run_id: int, cfg: Config, log: RunLog,
                                  src=src, dst=dst, reason=item.reason)
                 moved += len(confirmed)
                 progress.tick(len(confirmed))
+                progress.note(f"moved {moved:,} skipped {skipped:,} failed {failed:,}")
             elif uidvalidity_lost:
                 # Every stored UID for this folder now names a different
                 # message, so there is nothing left to salvage here: not this

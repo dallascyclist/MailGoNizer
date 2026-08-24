@@ -359,3 +359,78 @@ def test_fetch_identity_also_tolerates_a_quoted_key():
                                datetime(2017, 12, 8, 22, 39, tzinfo=timezone.utc),
                                69678)
     assert ident == {1: expected}
+
+
+# --- vanished messages vs. a server we cannot talk to -------------------
+#
+# A message expunged between plan and apply comes back as a degenerate FETCH:
+# the server answers with FLAGS and SEQ and nothing else. That is a per-item
+# condition the executor already handles as "vanished". A response that
+# describes a real message but whose header key we cannot find is a different
+# thing entirely and must still be fatal.
+
+class VanishedMessageClient(FakeClient):
+    """uid 1 is alive; uid 2 was expunged and comes back as FLAGS/SEQ only."""
+
+    def select_folder(self, folder, readonly=True):
+        return {b"UIDVALIDITY": 100, b"UIDNEXT": 3, b"EXISTS": 1}
+
+    def search(self, criteria):
+        return [1, 2]
+
+    def fetch(self, uids, specs):
+        from datetime import datetime, timezone
+        out = {}
+        for u in uids:
+            if u == 2:
+                out[u] = {b"FLAGS": (), b"SEQ": 2}          # gone
+            else:
+                out[u] = {b"INTERNALDATE": datetime(2017, 12, 8, 22, 39,
+                                                    tzinfo=timezone.utc),
+                          b"RFC822.SIZE": 69678, b"FLAGS": (), b"SEQ": 1,
+                          _DOVECOT_KEY: _REAL_HEADERS}
+        return out
+
+
+def test_fetch_identity_omits_a_vanished_message_instead_of_aborting():
+    mb = Mailbox(VanishedMessageClient(folders=["INBOX"]), cfg())
+    ident = mb.fetch_identity([1, 2])
+    assert 1 in ident, "the live message must still resolve"
+    assert 2 not in ident, "a vanished message must be omitted, not fatal"
+
+
+def test_survey_skips_a_vanished_message_rather_than_aborting():
+    mb = Mailbox(VanishedMessageClient(folders=["INBOX"]), cfg())
+    recs = list(mb.fetch_headers("INBOX"))
+    assert [r.uid for r in recs] == [1]
+
+
+def test_a_real_message_with_an_unfindable_header_key_is_still_fatal():
+    """Degenerate responses are benign; a populated one we cannot read is not."""
+    class WrongKeyClient(VanishedMessageClient):
+        def fetch(self, uids, specs):
+            from datetime import datetime, timezone
+            return {u: {b"INTERNALDATE": datetime(2017, 12, 8, tzinfo=timezone.utc),
+                        b"RFC822.SIZE": 100, b"FLAGS": (), b"SEQ": u,
+                        b"SOMETHING.ELSE": b"payload"} for u in uids}
+    mb = Mailbox(WrongKeyClient(folders=["INBOX"]), cfg())
+    with pytest.raises(FatalError, match="header"):
+        mb.fetch_identity([1])
+
+
+def test_select_does_not_reissue_for_the_folder_already_selected():
+    """48,744 destination groups once meant 48,744 full SELECTs of a
+    190,000-message INBOX -- about seven hours of pure overhead."""
+    client = VanishedMessageClient(folders=["INBOX"])
+    calls = []
+    original = client.select_folder
+    client.select_folder = lambda f, readonly=True: (calls.append((f, readonly))
+                                                     or original(f, readonly))
+    mb = Mailbox(client, cfg())
+    for _ in range(50):
+        mb.select("INBOX", readonly=False)
+    assert len(calls) == 1, f"re-selected {len(calls)} times"
+
+    mb.select("INBOX", readonly=True)      # mode change must re-select
+    mb.select("Other", readonly=False)     # folder change must re-select
+    assert len(calls) == 3

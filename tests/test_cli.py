@@ -320,3 +320,38 @@ def test_export_index_runs_without_a_server(root, capsys):
 def test_undo_requires_an_explicit_run_id(root):
     with pytest.raises(SystemExit):
         main(["--root", str(root), "undo"])
+
+
+def test_a_fatal_error_mid_apply_closes_the_run_and_says_how_to_resume(root, capsys):
+    """A crash left two runs stuck at status='running' forever, and nothing
+    told the operator that 48,000 moves were durable and resumable."""
+    from mailgonizer import cli as cli_mod
+    from mailgonizer.imap import FatalError
+
+    mb = StubMailbox(headers={"INBOX": [make_record(uid=1), make_record(uid=2)]})
+    run_cli(root, ["plan"], mb)
+
+    # Simulate a run that moved some mail and then hit the fatal error, which
+    # is what actually happened: 48,092 moves durable, then an abort.
+    db = root / "db" / "mailgonizer.sqlite"
+    with Index.open(db) as index:
+        run_id = index.last_run()["run_id"]
+        index.mark_done(run_id, index.pending_items(run_id)[0].seq, "<a@b>", None)
+
+    def boom(*a, **k):
+        raise FatalError("no header payload in the FETCH response for uid 153663")
+
+    original = cli_mod.runner.do_apply
+    cli_mod.runner.do_apply = boom
+    try:
+        code = run_cli(root, ["apply"], mb)
+    finally:
+        cli_mod.runner.do_apply = original
+
+    assert code == 1
+    with Index.open(root / "db" / "mailgonizer.sqlite") as index:
+        row = index.last_run()
+        assert row["status"] != "running", "run left open after a fatal error"
+        assert row["finished_at"] is not None
+    err = capsys.readouterr().err
+    assert "apply --run" in err, "no resume hint given"

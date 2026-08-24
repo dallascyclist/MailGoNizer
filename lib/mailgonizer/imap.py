@@ -89,7 +89,7 @@ def _require_aware(source: str, uid: int, internaldate) -> None:
         )
 
 
-def _body_payload(data: dict, uid: int, source: str) -> bytes:
+def _body_payload(data: dict, uid: int, source: str) -> bytes | None:
     """The header payload from a FETCH response, however the server spelled it.
 
     We ask for BODY.PEEK[HEADER.FIELDS (...)]; the server answers with a key
@@ -109,6 +109,12 @@ def _body_payload(data: dict, uid: int, source: str) -> bytes:
     every sender resolved to `_unknown`, and every date fallen back to
     INTERNALDATE — reporting success the whole way. If the headers are not in
     the response, nothing downstream can be trusted, so stop.
+
+    One response is not that, and returns None instead: a message expunged
+    between plan and apply comes back degenerate — FLAGS and SEQ and nothing
+    else, no INTERNALDATE, no size, no body. That is an ordinary per-item
+    condition the caller handles as "vanished", and treating it as fatal turned
+    a single dead UID into an aborted seven-hour run.
     """
     for key, value in data.items():
         if not isinstance(key, (bytes, bytearray)):
@@ -116,6 +122,12 @@ def _body_payload(data: dict, uid: int, source: str) -> bytes:
         upper = bytes(key).upper()
         if upper.startswith(b"BODY[") and b"HEADER" in upper:  # response-key
             return value
+    # A response carrying neither a timestamp nor a size does not describe a
+    # message that exists. The UID is gone; say so and let the caller skip it.
+    if not any(bytes(k).upper() in (b"INTERNALDATE", b"RFC822.SIZE")
+               for k in data if isinstance(k, (bytes, bytearray))):
+        return None
+
     raise FatalError(
         f"{source}: no header payload in the FETCH response for uid {uid}. "
         f"Requested {_FETCH_HEADERS!r}; the server returned keys "
@@ -131,7 +143,8 @@ class Mailbox:
         self.client = client
         self.cfg = cfg
         self._caps: Capabilities | None = None
-        self._selected: str | None = None
+        self._selected: tuple[str, bool] | None = None
+        self._selected_state: tuple[int, int] | None = None
 
     @classmethod
     def connect(cls, cfg: Config) -> Mailbox:
@@ -215,9 +228,22 @@ class Mailbox:
                 self.client.subscribe_folder(partial)
 
     def select(self, folder: str, readonly: bool = True) -> tuple[int, int]:
+        """SELECT/EXAMINE a folder, skipping the round trip when it is current.
+
+        The executor groups plan items by (source, destination), and a real
+        mailbox produced 48,744 destination groups — every one of which
+        re-SELECTed the same INBOX. Re-selecting a 190,000-message folder is
+        not free on the server, and it accounted for roughly seven hours of a
+        run that moved 48,000 messages. Caching the selection collapses that to
+        one SELECT per folder per mode.
+        """
+        if self._selected == (folder, readonly) and self._selected_state:
+            return self._selected_state
         info = self.client.select_folder(folder, readonly=readonly)
-        self._selected = folder
-        return int(info.get(b"UIDVALIDITY", 0)), int(info.get(b"UIDNEXT", 0))
+        self._selected = (folder, readonly)
+        self._selected_state = (int(info.get(b"UIDVALIDITY", 0)),
+                                int(info.get(b"UIDNEXT", 0)))
+        return self._selected_state
 
     # --- reads ------------------------------------------------------------
 
@@ -229,7 +255,9 @@ class Mailbox:
         a percentage.
         """
         info = self.client.select_folder(folder, readonly=True)
-        self._selected = folder
+        self._selected = (folder, True)
+        self._selected_state = (int(info.get(b"UIDVALIDITY", 0)),
+                                int(info.get(b"UIDNEXT", 0)))
         return int(info.get(b"EXISTS", 0))
 
     def _search_all_uids(self, uidnext: int) -> list[int]:
@@ -262,6 +290,8 @@ class Mailbox:
             response = self.client.fetch(chunk, [*_FETCH_META, _FETCH_HEADERS])
             for uid, data in response.items():
                 raw = _body_payload(data, int(uid), "fetch_headers")
+                if raw is None:      # expunged between SEARCH and FETCH
+                    continue
                 headers = email.message_from_bytes(raw, policy=default_policy)
                 internaldate = data[b"INTERNALDATE"]
                 _require_aware("fetch_headers", int(uid), internaldate)
@@ -280,6 +310,8 @@ class Mailbox:
         out = {}
         for uid, data in response.items():
             raw = _body_payload(data, int(uid), "fetch_identity")
+            if raw is None:          # expunged between plan and apply
+                continue
             headers = email.message_from_bytes(raw, policy=default_policy)
             message_id = headers.get("message-id")
             internaldate = data[b"INTERNALDATE"]

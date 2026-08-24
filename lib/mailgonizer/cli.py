@@ -165,6 +165,7 @@ def main(argv: list[str] | None = None, mailbox_factory=None) -> int:
                 log.error(_transient(exc))
                 return EXIT_FATAL
 
+    active_run: int | None = None
     with Index.open(db_path) as index, \
             RunLog.open(log_dir, RunLog.stamp_now(), level) as log:
         try:
@@ -190,6 +191,7 @@ def main(argv: list[str] | None = None, mailbox_factory=None) -> int:
 
             if args.command == "plan":
                 run_id, result = runner.do_plan(mailbox, index, cfg, psl, log)
+                active_run = run_id
                 index.finish_run(run_id, "ok", result.counts)
                 log.verdict(result.counts)
                 RunLog.prune(log_dir, cfg.logging.retention_runs)
@@ -197,6 +199,7 @@ def main(argv: list[str] | None = None, mailbox_factory=None) -> int:
 
             if args.command == "apply":
                 run_id = _latest_run(index, args.run)
+                active_run = run_id
                 if not index.all_items(run_id):
                     raise FatalError(f"run {run_id} has no plan items")
                 outcome = runner.do_apply(mailbox, index, cfg, log, run_id,
@@ -211,6 +214,7 @@ def main(argv: list[str] | None = None, mailbox_factory=None) -> int:
 
             if args.command == "run":
                 run_id, result = runner.do_plan(mailbox, index, cfg, psl, log)
+                active_run = run_id
                 if args.dry_run:
                     index.finish_run(run_id, "ok", result.counts)
                     log.info("dry run: no moves performed")
@@ -241,6 +245,22 @@ def main(argv: list[str] | None = None, mailbox_factory=None) -> int:
         except FatalError as exc:
             log.error(str(exc))
             print(f"mailgonizer: {exc}", file=sys.stderr)
+            # Close the run out rather than leaving it at status='running'
+            # forever. Every move already made is durable in the move log, so
+            # say plainly that the work survived and how to pick it up.
+            if active_run is not None:
+                done = sum(1 for r in index.all_items(active_run)
+                           if r["state"] == "done")
+                index.finish_run(active_run, "aborted",
+                                 {"aborted_after_moves": done})
+                if done:
+                    hint = (f"{done:,} moves are already recorded and durable. "
+                            f"Resume with: mailgonizer apply --run {active_run}")
+                    log.info(hint)
+                    print(f"mailgonizer: {hint}", file=sys.stderr)
+                else:
+                    print(f"mailgonizer: run {active_run} aborted before any "
+                          "mail moved.", file=sys.stderr)
             return EXIT_FATAL
         except TransientError as exc:
             message = _transient(exc)

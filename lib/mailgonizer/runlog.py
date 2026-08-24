@@ -72,8 +72,18 @@ class Progress:
         self._interval = interval
         self._clock = clock
         self._count = 0
+        self._note = ""
         self._start = clock()
         self._last = self._start
+
+    def note(self, text: str) -> None:
+        """Extra context appended to each line, e.g. running skip/fail counts.
+
+        A run that is quietly skipping thousands of messages looks identical to
+        one that is moving them, and the difference matters long before the
+        final verdict.
+        """
+        self._note = text
 
     def tick(self, n: int = 1) -> None:
         self._count += n
@@ -99,6 +109,8 @@ class Progress:
         if self._total and rate > 0 and self._count < self._total:
             parts.append(f"eta {_human_seconds((self._total - self._count) / rate)}")
         parts.append(f"rss {_human_bytes(_rss_bytes())}")
+        if self._note:
+            parts.append(self._note)
         self._log.info("  ".join(parts))
 
 
