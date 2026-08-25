@@ -1,4 +1,5 @@
-# Runtime state — owned by the tool, never committed
+# Runtime state — owned by the tool, never committed.
+# etc/config.yaml holds your IMAP password; keep it ignored.
 venv/
 log/
 db/
@@ -12,18 +13,5 @@ __pycache__/
 .ruff_cache/
 *.egg-info/
 
-# Local agent tooling
-.remember/
-.serena/
-.claude/settings.local.json
-
 # macOS
 .DS_Store
-
-# SDD workspace (scratch)
-.superpowers/
-
-# Claude Code / agent artifacts
-.claude/
-CLAUDE.md
-docs/superpowers/

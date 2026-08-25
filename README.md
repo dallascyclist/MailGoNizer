@@ -29,6 +29,10 @@ launch. Runs monthly via cron; safe to run by hand too.
 - Creates archive folders **unsubscribed by default**
   (`execution.subscribe_created_folders`), so mobile clients don't enumerate
   them at startup.
+- Gathers UIDs in bounded windows rather than one `SEARCH ALL`. A server
+  answers SEARCH with every matching UID on a single untagged line, and
+  `imaplib` refuses any line over 1 MB — about 125,000 messages. Windowing
+  keeps each response small regardless of mailbox size.
 - Never deletes mail — only moves it. Moves are server-side (`MOVE`,
   RFC 6851, or `COPY` + targeted `UID EXPUNGE` under `UIDPLUS`, RFC 4315) —
   the message body is never downloaded.
@@ -94,6 +98,70 @@ individual messages failed. Skipped messages (`already_moved`, `vanished`,
 `identity_mismatch`, and similar) are normal — expected on any idempotent
 re-run — and do not affect the exit code. Any non-zero exit is what
 surfaces the run via cron's mail-on-failure behavior.
+
+## Running it on a large mailbox
+
+Verified against a real ~190,000-message, twenty-year INBOX on CommuniGate Pro.
+Some things only show up at that size.
+
+**It reports progress.** Every long phase prints a line roughly every five
+seconds — count against total, percentage, throughput, elapsed, a rough ETA and
+resident set size. `EXECUTE` also carries running moved/skipped/failed counts,
+because a run quietly skipping thousands of messages otherwise looks identical
+to one moving them.
+
+```
+SURVEY INBOX  48,075/194,031 (25%)  310/s  elapsed 2m35s  eta 7m50s  rss 412.3MB
+EXECUTE       48,075/194,031 (25%)  310/s  elapsed 2m35s  eta 7m50s  rss 412.3MB  moved 47,900 skipped 175 failed 0
+```
+
+The ETA divides what is left by the average rate so far. It does not model the
+archive sweep running faster than the inbox sweep, or a server that slows under
+load. It answers "minutes or hours".
+
+**Expect real memory.** Planning holds every surveyed header record at roughly
+1.6 KB each, so a 300,000-message mailbox peaks near 0.6–0.8 GB. The `rss`
+column tells you directly. On a small VPS, size the host deliberately.
+
+**It resumes.** Moves are recorded in an append-only log as they happen, so an
+interrupted run loses nothing. If a run aborts it now says so and prints the
+command to continue:
+
+```
+mailgonizer: 48,092 moves are already recorded and durable.
+Resume with: mailgonizer apply --run 7
+```
+
+A resumed `apply` consults the move log before touching anything, so a message
+already moved is never moved twice even if the plan is stale.
+
+**Watch the folder count.** The default `archive.promote_threshold` of 13 gives
+any local part with more than thirteen messages in a year its own subfolder.
+On a large, sender-diverse mailbox that adds up: the test mailbox above
+produced roughly 48,000 destination folders. Folders are created unsubscribed
+so mobile clients do not enumerate them, but if you want fewer, raise
+`promote_threshold` before the first run — promotion is a one-way ratchet and
+is not undone by lowering it later.
+
+**Run `plan` and read it first.** `show-plan --format csv` on a first run is
+the cheapest way to find out that something is mis-resolving before any mail
+moves.
+
+## Server compatibility
+
+The tool talks plain IMAP and probes what the server offers at connect time,
+but two details vary between servers in ways worth knowing:
+
+- **Response-key spelling.** A `BODY.PEEK[HEADER.FIELDS (...)]` fetch is
+  answered with a key that is supposed to be the request minus `PEEK`. Dovecot
+  echoes it verbatim; CommuniGate Pro quotes every field name. The payload is
+  located by shape rather than by exact string, so both work — and if no header
+  payload can be found at all, the run aborts loudly rather than filing every
+  message under an unknown sender.
+- **Hierarchy delimiter.** Discovered per server. Sender domains are escaped so
+  a folder never contains the delimiter, which is what stops `amazon.com` from
+  becoming `amazon/com` on a Maildir++ server. Names are byte-identical across
+  servers, so an archive built on one migrates to another as a plain copy.
 
 ## Directory layout
 
